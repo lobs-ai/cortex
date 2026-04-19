@@ -11,9 +11,11 @@ See `personal_ai_executive_assistant_design_doc.md` for the full design.
 ## Architecture at a glance
 
 - **Frontend**: Next.js + React + TypeScript (dashboard, calendar, tasks, projects, chat, memory/settings).
-- **Backend**: Python + FastAPI, exposing REST + real-time updates.
-- **Workers**: Background jobs for sync, planning, monitoring, memory consolidation, notifications.
+- **Backend**: Node.js + TypeScript + Fastify, exposing REST + SSE/WebSocket updates.
+- **ORM**: Drizzle (typed SQL, Postgres-first).
+- **Workers**: BullMQ (Redis-backed) for sync, planning, monitoring, memory consolidation, notifications.
 - **Data**: PostgreSQL (with pgvector), Redis.
+- **Validation**: Zod schemas shared between backend and frontend.
 - **Integrations**: Google Calendar, Discord, LLM provider(s).
 - **Deployment**: Docker Compose (frontend, backend, worker, postgres, redis, proxy).
 
@@ -61,7 +63,7 @@ When making tradeoffs, favor whichever option moves these forward.
 
 - Implementation is in early/planning stage — the design doc is the source of truth for scope and structure.
 - Stick to the current phase's scope unless the user asks otherwise.
-- When adding code, mirror the suggested folder layout (`frontend/`, `backend/app/{api,models,schemas,services,ai,jobs,integrations}`, `infra/`).
+- When adding code, mirror the suggested folder layout (`frontend/`, `backend/src/{routes,db,schemas,services,ai,jobs,integrations}`, `infra/`).
 
 ## Things to be careful with
 

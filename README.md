@@ -9,7 +9,7 @@ See [docs/design/design-doc.md](docs/design/design-doc.md) for the full product 
 ```
 cortex/
   frontend/     Next.js + TypeScript app
-  backend/      FastAPI + SQLAlchemy app
+  backend/      Fastify + TypeScript API (Drizzle + Postgres)
   infra/        docker-compose, nginx, scripts
   docs/
     design/     design doc
@@ -24,40 +24,40 @@ docker compose -f infra/docker-compose.yml up --build
 ```
 
 - Frontend: http://localhost:3000
-- Backend:  http://localhost:8000 (Swagger at `/docs`)
+- Backend:  http://localhost:8000 (Swagger/OpenAPI at `/docs`)
 
 ## Quick start (local, no docker)
+
+Requires Node.js 20+ and a running Postgres (or use the SQLite dev fallback by leaving `DATABASE_URL` unset — the backend will store data in `backend/cortex.db`).
 
 Two terminals:
 
 ```bash
 # terminal 1 — backend
 cd backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python -m app.seed          # seed demo data (SQLite default)
-uvicorn app.main:app --reload
+npm install
+npm run db:push         # apply schema
+npm run seed            # seed demo data
+npm run dev             # Fastify on :8000
 ```
 
 ```bash
 # terminal 2 — frontend
 cd frontend
 npm install
-npm run dev
+npm run dev             # Next.js on :3000
 ```
-
-The backend defaults to SQLite (`backend/cortex.db`) when `DATABASE_URL` is unset, so no Postgres is required to run locally.
 
 ## Demo data
 
-`python -m app.seed` loads the CSE-grad-student demo that matches the design prototype — NeurIPS rebuttal, advisor 1:1, EECS 598/484, etc. See `docs/example/` for the original design that this data is modeled on.
+`npm run seed` (in `backend/`) loads the CSE-grad-student demo that matches the design prototype — NeurIPS rebuttal, advisor 1:1, EECS 598/484, etc. See `docs/example/` for the original design that this data is modeled on.
 
 ## Phases
 
 Working priorities (per `AGENTS.md`):
 
-- **Phase 1 — foundation**: backend API, task system, calendar integration, dashboard UI. ✓
+- **Phase 1 — foundation**: backend API, task system, calendar integration, dashboard UI.
 - **Phase 2 — AI surface**: LLM planning, chat, Discord notifications.
 - **Phase 3 — intelligence**: proactive assistant, memory system, advanced scheduling.
 
-The AI roles (Planner, Monitor, Memory curator, Chat) are wired as pluggable stubs that return structured outputs. Swap in an LLM by implementing `backend/app/ai/client.py`.
+The AI roles (Planner, Monitor, Memory curator, Chat) are wired as pluggable TypeScript modules that return structured outputs. Swap in an LLM by configuring `ANTHROPIC_API_KEY` — with no key, the stubs return deterministic demo responses so the UI always works.

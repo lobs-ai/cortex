@@ -316,11 +316,13 @@ Sections:
 ## 9. Backend design
 
 ## 9.1 Tech stack
-- Python + FastAPI
-- SQLAlchemy
-- PostgreSQL
+- Node.js 20+ with TypeScript
+- Fastify (HTTP framework)
+- Drizzle ORM (typed SQL over Postgres)
+- PostgreSQL (with pgvector for embeddings)
 - Redis
-- Celery, Dramatiq, or RQ for background jobs
+- BullMQ for background jobs
+- Zod for request/response validation (schemas can be shared with the frontend)
 - Docker for deployment
 - Optional Nginx or Caddy reverse proxy
 
@@ -1131,31 +1133,36 @@ This data improves personalization.
 ## 24. Suggested folder / repo structure
 
 ```text
-assistant-app/
-  frontend/
+cortex/
+  frontend/              Next.js app
     app/
     components/
     lib/
     hooks/
     styles/
-  backend/
-    app/
-      api/
-      models/
-      schemas/
-      services/
-      ai/
-      jobs/
-      integrations/
-      utils/
-    migrations/
+  backend/               Fastify + TypeScript service
+    src/
+      routes/            HTTP route handlers
+      db/                Drizzle schema + client
+      schemas/           Zod request/response schemas
+      services/          Business logic (planning, scheduling, memory, notifications)
+      ai/                AI role modules (planner, monitor, curator, chat) + LLM client
+      jobs/              BullMQ worker + job definitions
+      integrations/      Google Calendar, Discord, etc.
+      lib/               Utilities (auth, crypto, time)
+      server.ts          Fastify entry
+      worker.ts          Worker entry
+    drizzle/             Generated migrations
+    drizzle.config.ts
+    package.json
+    tsconfig.json
   infra/
     docker/
     nginx/
     scripts/
   docs/
     design/
-    api/
+    example/             Reference HTML prototype
   docker-compose.yml
   README.md
 ```
