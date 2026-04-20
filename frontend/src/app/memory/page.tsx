@@ -98,24 +98,49 @@ export default function MemoryPage() {
               </span>
             </div>
             <div>
-              {preferences.map((p) => (
-                <div
-                  key={p.id}
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: "1px solid var(--hair)",
-                    display: "grid",
-                    gridTemplateColumns: "150px 1fr",
-                    gap: 12,
-                    fontSize: 12.5,
-                  }}
-                >
-                  <span className="caps">{p.key}</span>
-                  <span className="mono">
-                    {typeof p.value === "string" ? p.value : JSON.stringify(p.value)}
-                  </span>
-                </div>
-              ))}
+              {preferences.map((p) => {
+                const val = typeof p.value === "string" ? p.value : p.value;
+                const isObj = val !== null && typeof val === "object";
+                return (
+                  <div
+                    key={p.id}
+                    style={{
+                      padding: "10px 12px",
+                      borderBottom: "1px solid var(--hair)",
+                      display: "grid",
+                      gridTemplateColumns: "160px 1fr",
+                      gap: 12,
+                      fontSize: 12.5,
+                      alignItems: "start",
+                    }}
+                  >
+                    <span className="caps" style={{ color: "var(--fg-muted)", paddingTop: 2 }}>{p.key}</span>
+                    {isObj ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {Object.entries(val as Record<string, unknown>).map(([k, v]) => (
+                          <span
+                            key={k}
+                            style={{
+                              background: "var(--surface-raised, var(--bg-alt))",
+                              border: "1px solid var(--hair)",
+                              borderRadius: 4,
+                              padding: "1px 7px",
+                              fontSize: 12,
+                              fontFamily: "inherit",
+                            }}
+                          >
+                            <span style={{ color: "var(--fg-muted)" }}>{k}</span>
+                            <span style={{ margin: "0 3px", color: "var(--fg-faint, var(--hair))" }}>·</span>
+                            <span className="mono">{String(v)}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="mono">{String(val)}</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
 

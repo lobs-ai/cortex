@@ -1,13 +1,16 @@
 import { DEMO_USER_ID } from "./lib/user.js";
 import { runMonitor } from "./ai/monitor.js";
+import { syncCalendar } from "./services/googleCalendar.js";
 
 // Minimal background worker. Real BullMQ workers land in phase 3 along with
-// redis; in dev we just poll the monitor every 30 minutes so the proactive
-// rail has fresh alerts.
+// redis; in dev we just poll:
+//   - monitor every 30 min for proactive alerts
+//   - google calendar every 15 min (no-op if not connected)
 
-const INTERVAL_MS = 30 * 60 * 1000;
+const MONITOR_INTERVAL_MS = 30 * 60 * 1000;
+const CALENDAR_INTERVAL_MS = 15 * 60 * 1000;
 
-async function tick() {
+async function monitorTick() {
   try {
     const created = await runMonitor(DEMO_USER_ID);
     if (created.length > 0) console.log(`monitor: ${created.length} new notifications`);
@@ -16,6 +19,22 @@ async function tick() {
   }
 }
 
+async function calendarTick() {
+  try {
+    const res = await syncCalendar(DEMO_USER_ID);
+    if (res.synced > 0) {
+      console.log(
+        `calendar: ${res.inserted} new, ${res.updated} updated, ${res.cancelled} cancelled`,
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "not_connected" || msg === "google_oauth_not_configured") return;
+    console.error("calendar sync error:", err);
+  }
+}
+
 console.log("cortex worker starting");
-await tick();
-setInterval(tick, INTERVAL_MS);
+await Promise.all([monitorTick(), calendarTick()]);
+setInterval(monitorTick, MONITOR_INTERVAL_MS);
+setInterval(calendarTick, CALENDAR_INTERVAL_MS);

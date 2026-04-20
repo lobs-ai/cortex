@@ -9,6 +9,7 @@ import {
   listEvents,
   patchEvent,
 } from "../services/events.js";
+import { syncCalendar } from "../services/googleCalendar.js";
 
 const RangeQ = z.object({
   from: z.coerce.date().optional(),
@@ -52,9 +53,19 @@ export async function eventRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  app.post("/api/calendar/sync", async () => {
-    // Google Calendar sync lands in phase 2. The stub simply reports "ok"
-    // so the UI's Sync button doesn't fail.
-    return { ok: true, synced: 0, stub: true };
+  app.post("/api/calendar/sync", async (req, reply) => {
+    const u = currentUser(req);
+    try {
+      return await syncCalendar(u.id);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "not_connected") {
+        return reply.code(400).send({ error: "not_connected" });
+      }
+      if (msg === "google_oauth_not_configured") {
+        return reply.code(501).send({ error: "google_oauth_not_configured" });
+      }
+      throw err;
+    }
   });
 }

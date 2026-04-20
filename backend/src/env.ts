@@ -15,6 +15,11 @@ export const env = {
   LLM_MODEL: process.env.LLM_MODEL || "claude-sonnet-4-6",
   DISCORD_BOT_TOKEN: process.env.DISCORD_BOT_TOKEN || "",
   DISCORD_DEFAULT_USER_ID: process.env.DISCORD_DEFAULT_USER_ID || "",
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || "",
+  GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET || "",
+  GOOGLE_REDIRECT_URI:
+    process.env.GOOGLE_REDIRECT_URI ||
+    "http://localhost:9009/api/integrations/google/callback",
 };
 
 export const isPostgres = env.DATABASE_URL.startsWith("postgres");

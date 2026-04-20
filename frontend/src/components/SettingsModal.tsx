@@ -541,21 +541,35 @@ function IntegrationsPane() {
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
+  const { data: googleStatus } = useQuery({
+    queryKey: ["integrations-google-status"],
+    queryFn: () => api.integrations.googleStatus(),
+  });
   const [editing, setEditing] = useState<Integration | null>(null);
   const [adding, setAdding] = useState(false);
 
   const refetch = () => qc.invalidateQueries({ queryKey: ["integrations"] });
 
-  const present = new Set(integrations.map((i) => i.provider));
-  const missing = INTEGRATION_OPTIONS.filter((o) => !present.has(o.id));
+  const google = integrations.find((i) => i.provider === "google_calendar");
+  const manual = integrations.filter((i) => i.provider !== "google_calendar");
+  // Manual "record status" add flow excludes google_calendar — it has its own
+  // OAuth button.
+  const manualOptions = INTEGRATION_OPTIONS.filter((o) => o.id !== "google_calendar");
+  const present = new Set(manual.map((i) => i.provider));
+  const missing = manualOptions.filter((o) => !present.has(o.id));
 
   return (
     <div className="panel-bd" style={{ display: "grid", gap: 14 }}>
       <div className="muted" style={{ fontSize: 11.5 }}>
-        Wire external systems (calendar, chat, code hosting) Cortex is allowed
-        to read or post to. OAuth sign-in lands in phase 2; for now you can
-        record that an integration exists and toggle its status.
+        External systems Cortex can read from or post to. Google Calendar uses
+        real OAuth; the others are record-only until their flows ship.
       </div>
+
+      <GoogleCalendarBlock
+        integration={google ?? null}
+        configured={googleStatus?.configured ?? false}
+        onChanged={refetch}
+      />
 
       <div style={{ border: "1px solid var(--hair)", background: "var(--bg)" }}>
         <div
@@ -567,23 +581,23 @@ function IntegrationsPane() {
             borderBottom: "1px solid var(--hair)",
           }}
         >
-          <div style={{ fontSize: 12.5, fontWeight: 500 }}>Connected</div>
+          <div style={{ fontSize: 12.5, fontWeight: 500 }}>Other integrations</div>
           <button
             type="button"
             className="btn"
             onClick={() => setAdding(true)}
             disabled={missing.length === 0}
-            title={missing.length === 0 ? "All known integrations are already added" : undefined}
+            title={missing.length === 0 ? "All other integrations are already added" : undefined}
           >
             + Add
           </button>
         </div>
-        {integrations.length === 0 ? (
+        {manual.length === 0 ? (
           <div className="muted" style={{ padding: "12px", fontSize: 11.5 }}>
-            No integrations yet. Click <b>Add</b> to record one.
+            No manual integrations recorded. Click <b>Add</b> to track one.
           </div>
         ) : (
-          integrations.map((it) => (
+          manual.map((it) => (
             <IntegrationRow
               key={it.id}
               integration={it}
@@ -614,6 +628,135 @@ function IntegrationsPane() {
           }}
           onCancel={() => setAdding(false)}
         />
+      )}
+    </div>
+  );
+}
+
+function GoogleCalendarBlock({
+  integration,
+  configured,
+  onChanged,
+}: {
+  integration: Integration | null;
+  configured: boolean;
+  onChanged: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+
+  const connected = integration?.status === "connected";
+
+  const connect = async () => {
+    setError(null);
+    setConnecting(true);
+    try {
+      await api.integrations.connectGoogle();
+      onChanged();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg !== "window_closed") setError(msg);
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const sync = useMutation({
+    mutationFn: () => api.integrations.syncCalendar(),
+    onSuccess: () => {
+      setError(null);
+      onChanged();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const disconnect = useMutation({
+    mutationFn: () => {
+      if (!integration) throw new Error("not_connected");
+      return api.integrations.disconnect(integration.id);
+    },
+    onSuccess: onChanged,
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  return (
+    <div style={{ border: "1px solid var(--hair)", background: "var(--bg)", padding: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 500 }}>Google Calendar</div>
+          <div className="muted" style={{ fontSize: 11 }}>
+            {connected
+              ? `Connected as ${integration?.detail ?? "unknown"}`
+              : "Real OAuth. Events sync into your calendar every 15 min."}
+          </div>
+        </div>
+        <span
+          className="chip"
+          style={{
+            color: connected ? "var(--green)" : "var(--muted)",
+            borderColor: connected
+              ? "color-mix(in oklch, var(--green), transparent 70%)"
+              : "var(--hair-2)",
+          }}
+        >
+          {integration?.status ?? "not connected"}
+        </span>
+      </div>
+
+      {!configured ? (
+        <div
+          style={{
+            fontSize: 11.5,
+            color: "var(--muted)",
+            background: "color-mix(in oklch, var(--yellow, #eab308), transparent 88%)",
+            border: "1px solid color-mix(in oklch, var(--yellow, #eab308), transparent 70%)",
+            padding: "8px 10px",
+            borderRadius: 4,
+          }}
+        >
+          Google OAuth is not configured. Set <code>GOOGLE_CLIENT_ID</code> and{" "}
+          <code>GOOGLE_CLIENT_SECRET</code> in your <code>.env</code>. See{" "}
+          <code>docs/INTEGRATIONS.md</code> for a step-by-step walkthrough.
+        </div>
+      ) : connected ? (
+        <div className="row gap-2" style={{ alignItems: "center" }}>
+          <div className="muted mono" style={{ fontSize: 10.5, flex: 1 }}>
+            {integration?.lastSyncedAt
+              ? `last synced ${new Date(integration.lastSyncedAt).toLocaleString()}`
+              : "not synced yet"}
+          </div>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => sync.mutate()}
+            disabled={sync.isPending}
+          >
+            {sync.isPending ? "Syncing…" : "Sync now"}
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => disconnect.mutate()}
+            disabled={disconnect.isPending}
+          >
+            Disconnect
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="btn primary"
+          onClick={connect}
+          disabled={connecting}
+        >
+          {connecting ? "Connecting…" : "Connect Google Calendar"}
+        </button>
+      )}
+
+      {error && (
+        <div style={{ color: "var(--red, #ef4444)", fontSize: 11.5, marginTop: 8 }}>
+          {error}
+        </div>
       )}
     </div>
   );

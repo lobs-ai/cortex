@@ -278,6 +278,53 @@ export const api = {
       }),
     remove: (id: string) =>
       req<{ ok: boolean }>(`/api/integrations/${id}`, { method: "DELETE" }),
+    disconnect: (id: string) =>
+      req<{ ok: boolean }>(`/api/integrations/${id}/disconnect`, { method: "POST" }),
+    googleStatus: () =>
+      req<{ configured: boolean }>("/api/integrations/google/status"),
+    // Opens Google OAuth in a popup. Resolves when the callback page posts
+    // back, rejects on timeout or user-close.
+    connectGoogle: (): Promise<{ ok: boolean; message?: string }> =>
+      new Promise((resolve, reject) => {
+        const url = `${BASE}/api/integrations/google/connect`;
+        const popup = window.open(url, "cortex-google-oauth", "width=720,height=720");
+        if (!popup) {
+          reject(new Error("Popup blocked — allow popups for this site"));
+          return;
+        }
+        const TIMEOUT_MS = 5 * 60 * 1000;
+        let finished = false;
+        const cleanup = () => {
+          finished = true;
+          window.removeEventListener("message", onMessage);
+          clearInterval(closedPoll);
+          clearTimeout(timeout);
+        };
+        const onMessage = (ev: MessageEvent) => {
+          const data = ev.data as { type?: string; ok?: boolean; message?: string } | undefined;
+          if (!data || data.type !== "google-oauth") return;
+          cleanup();
+          if (data.ok) resolve({ ok: true, message: data.message });
+          else reject(new Error(data.message || "connection failed"));
+        };
+        const closedPoll = setInterval(() => {
+          if (popup.closed && !finished) {
+            cleanup();
+            reject(new Error("window_closed"));
+          }
+        }, 500);
+        const timeout = setTimeout(() => {
+          cleanup();
+          try { popup.close(); } catch {}
+          reject(new Error("timeout"));
+        }, TIMEOUT_MS);
+        window.addEventListener("message", onMessage);
+      }),
+    syncCalendar: () =>
+      req<{ synced: number; inserted: number; updated: number; cancelled: number }>(
+        "/api/calendar/sync",
+        { method: "POST" },
+      ),
   },
   chat: {
     send: (text: string, conversationId?: string) =>
