@@ -41,6 +41,8 @@ export type Event = {
   project: string | null;
   attendees: number | null;
   rsvpStatus: "needsAction" | "accepted" | "declined" | "tentative" | null;
+  accessRole: string | null;
+  subscribed: boolean;
   important: boolean;
   status: string;
 };
@@ -82,7 +84,7 @@ export type PlanBlock = {
 };
 
 export type PlanInputs = {
-  events: { title: string; start: string; end: string; kind: string; location: string | null }[];
+  events: { title: string; start: string; end: string; kind: string; location: string | null; subscribed?: boolean }[];
   freeBlocks: { start: string; end: string }[];
   tasks: { id: string; title: string; priority: string; due: string | null; estMin: number | null; status: string }[];
   guidance?: string;

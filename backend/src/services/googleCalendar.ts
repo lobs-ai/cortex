@@ -50,6 +50,7 @@ async function syncOneCalendar(
   to: Date,
   todayStart: Date,
   todayEnd: Date,
+  accessRole: string,
 ): Promise<SyncStats> {
   const res = await cal.events.list({
     calendarId,
@@ -100,6 +101,7 @@ async function syncOneCalendar(
         +existing.endTime !== +end ||
         existing.status !== status ||
         existing.rsvpStatus !== rsvpStatus ||
+        existing.accessRole !== accessRole ||
         existing.location !== (g.location ?? null);
       if (g.status === "cancelled") cancelled++;
       else updated++;
@@ -114,6 +116,7 @@ async function syncOneCalendar(
           timezone: tz,
           attendeesJson,
           rsvpStatus,
+          accessRole,
           status,
           updatedAt: now,
         })
@@ -136,6 +139,7 @@ async function syncOneCalendar(
         kind: "meeting",
         attendeesJson,
         rsvpStatus,
+        accessRole,
         important: false,
         status,
         createdAt: now,
@@ -194,6 +198,32 @@ export async function syncCalendar(userId: string): Promise<{
     readSelections = allAuthed.map((a) => ({ calendarId: "primary", masterId: a.masterId }));
   }
 
+  // Preload accessRole per calendar so we can tag events as "mine" (owner/writer)
+  // vs "subscribed" (reader/freeBusyReader). Key: `${masterId}:${calendarId}`.
+  // Also map "primary" alias to the primary calendar's real id.
+  const accessByKey = new Map<string, string>();
+  for (const authed of allAuthed) {
+    try {
+      const cal = google.calendar({ version: "v3", auth: authed.client });
+      const res = await cal.calendarList.list({ maxResults: 100 });
+      const items = (res.data.items ?? []) as Array<{
+        id?: string | null;
+        accessRole?: string | null;
+        primary?: boolean | null;
+      }>;
+      for (const it of items) {
+        if (!it.id) continue;
+        const role = it.accessRole ?? "reader";
+        accessByKey.set(`${authed.masterId}:${it.id}`, role);
+        if (it.primary) accessByKey.set(`${authed.masterId}:primary`, role);
+      }
+    } catch {
+      // calendarList may be unauthorized for some accounts; fall back to "reader"
+    }
+  }
+  const roleFor = (masterId: string, calendarId: string): string =>
+    accessByKey.get(`${masterId}:${calendarId}`) ?? "reader";
+
   let inserted = 0, updated = 0, cancelled = 0;
   let todayTouched = false;
   const now = new Date();
@@ -203,7 +233,8 @@ export async function syncCalendar(userId: string): Promise<{
     if (!client) continue;
     const cal = google.calendar({ version: "v3", auth: client });
     try {
-      const stats = await syncOneCalendar(userId, sel.calendarId, cal, from, to, todayStart, todayEnd);
+      const role = roleFor(sel.masterId, sel.calendarId);
+      const stats = await syncOneCalendar(userId, sel.calendarId, cal, from, to, todayStart, todayEnd, role);
       inserted += stats.inserted;
       updated += stats.updated;
       cancelled += stats.cancelled;
@@ -221,7 +252,8 @@ export async function syncCalendar(userId: string): Promise<{
       for (const authed of allAuthed) {
         const cal = google.calendar({ version: "v3", auth: authed.client });
         try {
-          const extra = await syncOneCalendar(userId, writeCalId, cal, from, to, todayStart, todayEnd);
+          const role = roleFor(authed.masterId, writeCalId);
+          const extra = await syncOneCalendar(userId, writeCalId, cal, from, to, todayStart, todayEnd, role);
           inserted += extra.inserted;
           updated += extra.updated;
           cancelled += extra.cancelled;

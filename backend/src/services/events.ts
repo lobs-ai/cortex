@@ -7,6 +7,7 @@ import { isFeatureEnabled } from "./googleAuth.js";
 import { pushEventToGoogle, deleteGoogleEvent, respondToGoogleEvent } from "./googleCalendar.js";
 
 try { rawDb.exec("ALTER TABLE events ADD COLUMN rsvp_status TEXT"); } catch { /* column exists */ }
+try { rawDb.exec("ALTER TABLE events ADD COLUMN access_role TEXT"); } catch { /* column exists */ }
 
 type Row = typeof schema.events.$inferSelect;
 
@@ -21,6 +22,10 @@ const hydrate = (r: Row) => ({
   project: r.projectId,
   attendees: r.attendeesJson ? (JSON.parse(r.attendeesJson) as { count?: number }).count ?? null : null,
   rsvpStatus: r.rsvpStatus as "needsAction" | "accepted" | "declined" | "tentative" | null,
+  accessRole: r.accessRole,
+  // Events on calendars the user doesn't own — e.g. class-wide office-hours calendars.
+  // Treat as informational FYI, not blocking commitments.
+  subscribed: r.accessRole === "reader" || r.accessRole === "freeBusyReader",
   important: !!r.important,
   status: r.status,
 });

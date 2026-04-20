@@ -1,8 +1,11 @@
+import { eq } from "drizzle-orm";
 import { listEvents } from "../services/events.js";
 import { listTasks } from "../services/tasks.js";
 import { createNotification, listActiveNotifications } from "../services/notifications.js";
 import { getLatestPlan } from "../services/plans.js";
 import type { PlanBlock } from "./planner.js";
+import { db, schema } from "../db/client.js";
+import { startOfDayInTz, endOfDayInTz, hmInTz } from "../lib/time.js";
 
 type Proposal = {
   severity: "high" | "med" | "low";
@@ -17,10 +20,10 @@ type Proposal = {
 // Deterministic rule-first monitor per design §12.4. LLM upgrade goes here later.
 export async function runMonitor(userId: string): Promise<Proposal[]> {
   const now = new Date();
-  const todayStart = new Date(now);
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date(todayStart);
-  todayEnd.setDate(todayEnd.getDate() + 1);
+  const [userRow] = await db.select().from(schema.users).where(eq(schema.users.id, userId));
+  const tz = userRow?.timezone ?? "America/Detroit";
+  const todayStart = startOfDayInTz(now, tz);
+  const todayEnd = endOfDayInTz(now, tz);
   const [tasks, events, existing, plan, todaysEvents] = await Promise.all([
     listTasks(userId),
     listEvents(userId, { from: now, to: addHours(now, 48) }),
@@ -83,10 +86,11 @@ export async function runMonitor(userId: string): Promise<Proposal[]> {
   // plan-aware: block_conflict — a today event overlaps a plan block that isn't that event
   if (plan && Array.isArray(plan.content?.blocks)) {
     const blocks = plan.content.blocks as PlanBlock[];
-    for (const ev of todaysEvents) {
+    const ownEvents = todaysEvents.filter((e) => !e.subscribed);
+    for (const ev of ownEvents) {
       if (+ev.end <= +now) continue; // already past
-      const evStart = minutesInto(todayStart, ev.start);
-      const evEnd = minutesInto(todayStart, ev.end);
+      const evStart = hmToMinutes(hmInTz(ev.start, tz));
+      const evEnd = hmToMinutes(hmInTz(ev.end, tz));
       for (const b of blocks) {
         // Only flag "planned work" blocks, not the meeting echoes of real events.
         if (b.kind !== "block") continue;
@@ -113,11 +117,11 @@ export async function runMonitor(userId: string): Promise<Proposal[]> {
     if (hero) {
       const heroStart = hmToMinutes(hero.start);
       const heroEnd = hmToMinutes(hero.end);
-      const nowMin = minutesInto(todayStart, now);
+      const nowMin = hmToMinutes(hmInTz(now, tz));
       let usable = Math.max(0, heroEnd - Math.max(heroStart, nowMin));
-      for (const ev of todaysEvents) {
-        const evStart = Math.max(heroStart, minutesInto(todayStart, ev.start));
-        const evEnd = Math.min(heroEnd, minutesInto(todayStart, ev.end));
+      for (const ev of ownEvents) {
+        const evStart = Math.max(heroStart, hmToMinutes(hmInTz(ev.start, tz)));
+        const evEnd = Math.min(heroEnd, hmToMinutes(hmInTz(ev.end, tz)));
         if (evEnd > evStart && evStart < heroEnd && evEnd > Math.max(heroStart, nowMin)) {
           usable -= Math.min(evEnd, heroEnd) - Math.max(evStart, Math.max(heroStart, nowMin));
         }
@@ -163,10 +167,6 @@ function addHours(d: Date, h: number) {
 function hmToMinutes(hm: string): number {
   const [h, m] = hm.split(":").map((n) => parseInt(n, 10));
   return (h || 0) * 60 + (m || 0);
-}
-
-function minutesInto(dayStart: Date, d: Date): number {
-  return Math.round((+d - +dayStart) / 60000);
 }
 
 function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {

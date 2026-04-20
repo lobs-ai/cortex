@@ -1,6 +1,7 @@
 import { and, asc, eq, gte, lte } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
+import { startOfDayInTz } from "../lib/time.js";
 
 type Block = { start: Date; end: Date };
 
@@ -9,16 +10,17 @@ type Block = { start: Date; end: Date };
 export async function findFreeBlocks(
   userId: string,
   date: Date,
-  opts: { workStart?: number; workEnd?: number; minMinutes?: number } = {},
+  opts: { workStart?: number; workEnd?: number; minMinutes?: number; tz?: string } = {},
 ): Promise<Block[]> {
   const workStart = opts.workStart ?? 9;
   const workEnd = opts.workEnd ?? 19;
   const minMinutes = opts.minMinutes ?? 30;
+  const tz = opts.tz;
 
-  const dayStart = new Date(date);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(dayStart);
-  dayEnd.setDate(dayEnd.getDate() + 1);
+  const dayStart = tz ? startOfDayInTz(date, tz) : (() => {
+    const d = new Date(date); d.setHours(0, 0, 0, 0); return d;
+  })();
+  const dayEnd = new Date(+dayStart + 24 * 60 * 60 * 1000);
 
   const events = await db
     .select()
@@ -32,13 +34,13 @@ export async function findFreeBlocks(
     )
     .orderBy(asc(schema.events.startTime));
 
-  const boundsStart = new Date(dayStart);
-  boundsStart.setHours(workStart, 0, 0, 0);
-  const boundsEnd = new Date(dayStart);
-  boundsEnd.setHours(workEnd, 0, 0, 0);
+  const boundsStart = new Date(+dayStart + workStart * 3_600_000);
+  const boundsEnd = new Date(+dayStart + workEnd * 3_600_000);
 
   const busy = events
     .filter((e) => e.kind !== "deadline")
+    // Subscribed (read-only) calendars are FYI — not the user's commitments.
+    .filter((e) => e.accessRole !== "reader" && e.accessRole !== "freeBusyReader")
     .map((e) => ({
       start: e.startTime < boundsStart ? boundsStart : e.startTime,
       end: e.endTime > boundsEnd ? boundsEnd : e.endTime,

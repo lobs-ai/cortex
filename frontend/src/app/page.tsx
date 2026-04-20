@@ -353,14 +353,30 @@ function WhyThisModal({ plan, onClose }: { plan: Plan; onClose: () => void }) {
             </div>
           )}
           <div>
-            <div className="caps" style={{ fontSize: 10 }}>events considered ({inputs?.events.length ?? 0})</div>
-            {(inputs?.events ?? []).map((e, i) => (
+            <div className="caps" style={{ fontSize: 10 }}>
+              your events ({(inputs?.events ?? []).filter((e) => !e.subscribed).length})
+            </div>
+            {(inputs?.events ?? []).filter((e) => !e.subscribed).map((e, i) => (
               <div key={i} className="mono" style={{ fontSize: 11.5, padding: "2px 0" }}>
                 {fmtHM(e.start)}–{fmtHM(e.end)} · {e.title}
               </div>
             ))}
-            {!inputs?.events.length && <div className="muted" style={{ fontSize: 11.5 }}>none</div>}
+            {!(inputs?.events ?? []).some((e) => !e.subscribed) && (
+              <div className="muted" style={{ fontSize: 11.5 }}>none</div>
+            )}
           </div>
+          {(inputs?.events ?? []).some((e) => e.subscribed) && (
+            <div>
+              <div className="caps" style={{ fontSize: 10 }}>
+                subscribed (FYI — not attending) ({(inputs?.events ?? []).filter((e) => e.subscribed).length})
+              </div>
+              {(inputs?.events ?? []).filter((e) => e.subscribed).map((e, i) => (
+                <div key={i} className="mono muted" style={{ fontSize: 11.5, padding: "2px 0" }}>
+                  {fmtHM(e.start)}–{fmtHM(e.end)} · {e.title}
+                </div>
+              ))}
+            </div>
+          )}
           <div>
             <div className="caps" style={{ fontSize: 10 }}>free blocks ({inputs?.freeBlocks.length ?? 0})</div>
             {(inputs?.freeBlocks ?? []).map((b, i) => (

@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { findFreeBlocks } from "../services/scheduling.js";
 import { listEvents } from "../services/events.js";
 import { listTasks } from "../services/tasks.js";
@@ -5,10 +6,19 @@ import { complete } from "./client.js";
 import { getActiveKey } from "../services/apiKeys.js";
 import { getProvider } from "./registry.js";
 import { getRoleModel } from "../services/settings.js";
+import { db, schema } from "../db/client.js";
+import { hmInTz, startOfDayInTz, endOfDayInTz } from "../lib/time.js";
 
 export type PlanBlock = { start: string; end: string; label: string; sub?: string; kind: string; hero?: boolean };
 export type PlanInputs = {
-  events: { title: string; start: string; end: string; kind: string; location: string | null }[];
+  events: {
+    title: string;
+    start: string;
+    end: string;
+    kind: string;
+    location: string | null;
+    subscribed: boolean;
+  }[];
   freeBlocks: { start: string; end: string }[];
   tasks: { id: string; title: string; priority: string; due: string | null; estMin: number | null; status: string }[];
   guidance?: string;
@@ -25,10 +35,13 @@ export async function generateDailyPlan(
   date: Date,
   opts?: { guidance?: string },
 ): Promise<DailyPlan> {
+  const [userRow] = await db.select().from(schema.users).where(eq(schema.users.id, userId));
+  const tz = userRow?.timezone ?? "America/Detroit";
+
   const [events, tasks, free] = await Promise.all([
-    listEvents(userId, { from: startOfDay(date), to: endOfDay(date) }),
+    listEvents(userId, { from: startOfDayInTz(date, tz), to: endOfDayInTz(date, tz) }),
     listTasks(userId),
-    findFreeBlocks(userId, date, { minMinutes: 30 }),
+    findFreeBlocks(userId, date, { minMinutes: 30, tz }),
   ]);
 
   const topTasks = tasks
@@ -50,6 +63,7 @@ export async function generateDailyPlan(
       end: e.end.toISOString(),
       kind: e.kind,
       location: e.location,
+      subscribed: !!e.subscribed,
     })),
     freeBlocks: free.map((b) => ({ start: b.start.toISOString(), end: b.end.toISOString() })),
     tasks: topTasks,
@@ -58,16 +72,32 @@ export async function generateDailyPlan(
 
   const cfg = await getRoleModel(userId, "planner");
   const entry = getProvider(cfg.provider);
-  if (!entry) return { ...heuristicPlan(events, tasks, free), inputs };
+  if (!entry) return { ...heuristicPlan(events, tasks, free, tz), inputs };
   if (entry.requiresApiKey) {
     const key = await getActiveKey(userId, cfg.provider);
-    if (!key) return { ...heuristicPlan(events, tasks, free), inputs };
+    if (!key) return { ...heuristicPlan(events, tasks, free, tz), inputs };
   }
 
+  const myEvents = events.filter((e) => !e.subscribed);
+  const subscribedEvents = events.filter((e) => e.subscribed);
   const context = {
     date: date.toISOString().slice(0, 10),
-    events: events.map((e) => ({ title: e.title, start: e.start, end: e.end, kind: e.kind, location: e.location })),
-    free_blocks: free.map((b) => ({ start: b.start, end: b.end })),
+    timezone: tz,
+    my_events: myEvents.map((e) => ({
+      title: e.title,
+      start: hmInTz(e.start, tz),
+      end: hmInTz(e.end, tz),
+      kind: e.kind,
+      location: e.location,
+    })),
+    subscribed_events: subscribedEvents.map((e) => ({
+      title: e.title,
+      start: hmInTz(e.start, tz),
+      end: hmInTz(e.end, tz),
+      kind: e.kind,
+      location: e.location,
+    })),
+    free_blocks: free.map((b) => ({ start: hmInTz(b.start, tz), end: hmInTz(b.end, tz) })),
     tasks: topTasks,
   };
 
@@ -78,7 +108,9 @@ export async function generateDailyPlan(
   const system =
     "You are the Planner role of Cortex. Produce a realistic block-by-block plan for today as JSON:\n" +
     `{ "summary": string, "blocks": [{ "start": "HH:MM", "end": "HH:MM", "label": string, "sub": string, "kind": "meeting"|"class"|"teach"|"personal"|"deadline"|"block", "hero": boolean? }] }\n` +
-    "- Include all confirmed events.\n" +
+    `- All times in CONTEXT and in your output are local wall-clock HH:MM in ${tz}. Do not convert to UTC.\n` +
+    "- Include every my_events entry as a block — these are the user's real commitments.\n" +
+    "- subscribed_events are from calendars the user is subscribed to but does NOT own (e.g. class calendars listing all staff office hours). The user is not attending these. Do NOT add them as blocks. Do NOT treat them as conflicts. You may reference one in a sub line only if clearly useful (e.g. \"prof's office hours open\").\n" +
     "- Add at most one 'hero' block for the day's highest-priority deep work, marked hero: true.\n" +
     "- Respect the user's free blocks for any new 'block' entries.\n" +
     "- Keep summary under 160 chars. Return JSON only." +
@@ -108,13 +140,14 @@ export async function generateDailyPlan(
     console.error("planner LLM failure; using heuristic:", err);
   }
 
-  return { ...heuristicPlan(events, tasks, free), inputs };
+  return { ...heuristicPlan(events, tasks, free, tz), inputs };
 }
 
 function heuristicPlan(
   events: Awaited<ReturnType<typeof listEvents>>,
   tasks: Awaited<ReturnType<typeof listTasks>>,
   free: { start: Date; end: Date }[],
+  tz: string,
 ): DailyPlan {
   const blocks: PlanBlock[] = [];
   const openTasks = tasks.filter((t) => t.status !== "done").sort((a, b) => (a.priority > b.priority ? 1 : -1));
@@ -122,9 +155,10 @@ function heuristicPlan(
   const heroSlot = free.find((b) => (+b.end - +b.start) / 60000 >= (hero?.estMin ?? 60));
 
   for (const e of events) {
+    if (e.subscribed) continue; // class-wide / FYI calendars aren't the user's commitments
     blocks.push({
-      start: fmtHM(e.start),
-      end: fmtHM(e.end),
+      start: hmInTz(e.start, tz),
+      end: hmInTz(e.end, tz),
       label: e.title,
       sub: e.location ?? "",
       kind: e.kind,
@@ -132,8 +166,8 @@ function heuristicPlan(
   }
   if (hero && heroSlot) {
     blocks.push({
-      start: fmtHM(heroSlot.start),
-      end: fmtHM(new Date(+heroSlot.start + (hero.estMin ?? 90) * 60000)),
+      start: hmInTz(heroSlot.start, tz),
+      end: hmInTz(new Date(+heroSlot.start + (hero.estMin ?? 90) * 60000), tz),
       label: `${hero.title} — deep work`,
       sub: "your best focus window",
       kind: "block",
@@ -146,18 +180,4 @@ function heuristicPlan(
     blocks,
     generatedBy: "planner:heuristic",
   };
-}
-
-function startOfDay(d: Date) {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
-function endOfDay(d: Date) {
-  const x = startOfDay(d);
-  x.setDate(x.getDate() + 1);
-  return x;
-}
-function fmtHM(d: Date) {
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }

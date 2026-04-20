@@ -423,17 +423,20 @@ function DayColumn({
               height,
               ...positionStyle,
               ...(pending ? { borderStyle: "dashed", opacity: 0.8 } : {}),
+              ...(ev.subscribed ? { opacity: 0.55, borderStyle: "dotted" } : {}),
             }}
+            title={ev.subscribed ? "Subscribed calendar — informational, not attending" : undefined}
           >
             <div className="t truncate">
               {ev.title}
               {reflection && <ReflectionBadge rating={reflection.rating} />}
-              {!reflection && ended && !pending && <ReflectUnratedBadge />}
+              {!reflection && ended && !pending && !ev.subscribed && <ReflectUnratedBadge />}
             </div>
             <div className="m">
               {fmtHM(new Date(ev.start))}–{fmtHM(new Date(ev.end))}
               {ev.location ? " · " + ev.location : ""}
               {pending ? " · pending" : ""}
+              {ev.subscribed ? " · subscribed" : ""}
             </div>
           </button>
         );

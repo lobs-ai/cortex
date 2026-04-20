@@ -70,6 +70,7 @@ export const events = sqliteTable("events", {
   projectId: text("project_id"),
   attendeesJson: text("attendees_json"),
   rsvpStatus: text("rsvp_status"), // "needsAction" | "accepted" | "declined" | "tentative"
+  accessRole: text("access_role"), // "owner" | "writer" | "reader" | "freeBusyReader" (null = Cortex-created)
   important: integer("important", { mode: "boolean" }).notNull().default(false),
   status: text("status").notNull().default("confirmed"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
