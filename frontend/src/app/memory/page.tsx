@@ -6,6 +6,7 @@ import { api, type Integration } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 import { IntegrationManage } from "@/components/IntegrationManage";
+import { Markdown } from "@/components/Markdown";
 
 const PROVIDER_OPTIONS = [
   { id: "google_calendar", label: "Google Calendar" },
@@ -62,7 +63,7 @@ export default function MemoryPage() {
             {tendencies.map((t) => (
               <div key={t.id} className="tend-row">
                 <div>
-                  <div>{t.text}</div>
+                  <Markdown inline>{t.text}</Markdown>
                   <div className="muted mono" style={{ fontSize: 10.5, marginTop: 2 }}>
                     {t.evidence} observations · last seen {fmtRelative(t.lastSeen)} · {t.status}
                   </div>

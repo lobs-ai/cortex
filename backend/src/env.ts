@@ -2,8 +2,6 @@ import "dotenv/config";
 
 export const env = {
   PORT: Number(process.env.PORT || 9009),
-  DATABASE_URL: process.env.DATABASE_URL || "",
-  REDIS_URL: process.env.REDIS_URL || "",
   JWT_SECRET: process.env.JWT_SECRET || "dev-secret",
   ENCRYPTION_KEY: process.env.ENCRYPTION_KEY || "dev-encryption-key",
   CORTEX_ENV: process.env.CORTEX_ENV || "dev",
@@ -21,5 +19,3 @@ export const env = {
     process.env.GOOGLE_REDIRECT_URI ||
     "http://localhost:9009/api/integrations/google/callback",
 };
-
-export const isPostgres = env.DATABASE_URL.startsWith("postgres");

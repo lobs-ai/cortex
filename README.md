@@ -31,8 +31,7 @@ Open http://localhost:9009.
 
 ## Quick start (local, no docker)
 
-Requires Node.js 20+. The backend stores data in `backend/cortex.db` (SQLite)
-unless `DATABASE_URL` is set.
+Requires Node.js 20+. The backend stores data in `backend/cortex.db` (SQLite).
 
 ```bash
 cd frontend && npm install && cd -

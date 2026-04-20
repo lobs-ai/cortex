@@ -16,8 +16,23 @@ const GRID_HEIGHT = HOURS.length * HOUR_PX;
 export default function CalendarPage() {
   const qc = useQueryClient();
   const [view, setView] = useState<View>("day");
-  const [weekOffset, setWeekOffset] = useState(0);
+  const [offset, setOffset] = useState(0); // days from today
   const [showCreate, setShowCreate] = useState(false);
+
+  const navigate = (dir: 1 | -1) => {
+    if (view === "day") {
+      setOffset((o) => o + dir);
+    } else if (view === "week") {
+      setOffset((o) => o + dir * 7);
+    } else {
+      setOffset((o) => {
+        const current = new Date(today);
+        current.setDate(current.getDate() + o);
+        const next = new Date(current.getFullYear(), current.getMonth() + dir, 1);
+        return Math.round((+next - +today) / 86400000);
+      });
+    }
+  };
 
   const today = useMemo(() => {
     const t = new Date();
@@ -67,17 +82,19 @@ export default function CalendarPage() {
     <div className="cal">
       <div className="cal-toolbar">
         <div className="row gap-2">
-          <button className="btn ghost" onClick={() => setWeekOffset(weekOffset - 1)}>
+          <button className="btn ghost" onClick={() => navigate(-1)}>
             <Icon name="chevL" size={14} />
           </button>
-          <button className="btn ghost" onClick={() => setWeekOffset(0)}>Today</button>
-          <button className="btn ghost" onClick={() => setWeekOffset(weekOffset + 1)}>
+          <button className="btn ghost" onClick={() => setOffset(0)}>Today</button>
+          <button className="btn ghost" onClick={() => navigate(1)}>
             <Icon name="chevR" size={14} />
           </button>
           <div className="mono" style={{ fontSize: 12, marginLeft: 8 }}>
             {view === "month"
-              ? new Date().toLocaleDateString([], { month: "long", year: "numeric" })
-              : `${fmtDateShort(new Date(+today + weekOffset * 7 * 86400000))} — week`}
+              ? new Date(+today + offset * 86400000).toLocaleDateString([], { month: "long", year: "numeric" })
+              : view === "day"
+              ? fmtDateShort(new Date(+today + offset * 86400000))
+              : `${fmtDateShort(new Date(+today + offset * 86400000))} — week`}
           </div>
         </div>
         <div className="grow" />
@@ -93,11 +110,11 @@ export default function CalendarPage() {
         </button>
       </div>
 
-      {view === "day" && <DayGrid today={today} eventsByDay={eventsByDay} />}
+      {view === "day" && <DayGrid today={today} eventsByDay={eventsByDay} offset={offset} />}
       {view === "week" && (
-        <WeekGrid today={today} eventsByDay={eventsByDay} weekOffset={weekOffset} />
+        <WeekGrid today={today} eventsByDay={eventsByDay} offset={offset} />
       )}
-      {view === "month" && <MonthView today={today} eventsByDay={eventsByDay} />}
+      {view === "month" && <MonthView today={today} eventsByDay={eventsByDay} offset={offset} />}
 
       {showCreate && (
         <NewEventModal
@@ -180,18 +197,25 @@ function useAutoScrollToNow(ref: React.RefObject<HTMLElement>) {
 function DayGrid({
   today,
   eventsByDay,
+  offset,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
+  offset: number;
 }) {
-  const events = eventsByDay.get(+today) ?? [];
+  const date = useMemo(() => {
+    const d = new Date(today);
+    d.setDate(d.getDate() + offset);
+    return d;
+  }, [today, offset]);
+  const events = eventsByDay.get(+date) ?? [];
   const scrollRef = useRef<HTMLDivElement>(null);
   useAutoScrollToNow(scrollRef);
 
   return (
     <div className="day-grid" ref={scrollRef}>
       <HourColumn />
-      <DayColumn date={today} events={events} isToday={true} />
+      <DayColumn date={date} events={events} isToday={offset === 0} />
     </div>
   );
 }
@@ -199,15 +223,15 @@ function DayGrid({
 function WeekGrid({
   today,
   eventsByDay,
-  weekOffset,
+  offset,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
-  weekOffset: number;
+  offset: number;
 }) {
   const days = useMemo(() => {
     const ref = new Date(today);
-    ref.setDate(ref.getDate() + weekOffset * 7);
+    ref.setDate(ref.getDate() + offset);
     const sunday = new Date(ref);
     sunday.setDate(ref.getDate() - ref.getDay());
     sunday.setHours(0, 0, 0, 0);
@@ -252,11 +276,19 @@ function WeekGrid({
 function MonthView({
   today,
   eventsByDay,
+  offset,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
+  offset: number;
 }) {
-  const first = new Date(today.getFullYear(), today.getMonth(), 1);
+  const displayDate = useMemo(() => {
+    const d = new Date(today);
+    d.setDate(d.getDate() + offset);
+    return d;
+  }, [today, offset]);
+
+  const first = new Date(displayDate.getFullYear(), displayDate.getMonth(), 1);
   const startOffset = first.getDay();
 
   const cells = Array.from({ length: 42 }, (_, i) => {
@@ -289,7 +321,7 @@ function MonthView({
       <div className="month">
         {cells.map((cell, i) => {
           const isToday = +cell === +today;
-          const isOther = cell.getMonth() !== today.getMonth();
+          const isOther = cell.getMonth() !== displayDate.getMonth();
           const cellEvents = eventsByDay.get(+cell) ?? [];
           return (
             <div

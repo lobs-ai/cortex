@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
 import { Chip } from "./Primitives";
 import { Icon } from "./Icon";
+import { Markdown } from "./Markdown";
 
 export function RightRail() {
   const qc = useQueryClient();
@@ -53,7 +54,7 @@ export function RightRail() {
             </button>
           </div>
           <div className="alert-title">{a.title}</div>
-          <div className="alert-body">{a.body}</div>
+          <div className="alert-body"><Markdown>{a.body}</Markdown></div>
           <div className="alert-actions">
             {a.actions.map((act, i) => (
               <button

@@ -2,8 +2,7 @@ import { DEMO_USER_ID } from "./lib/user.js";
 import { runMonitor } from "./ai/monitor.js";
 import { syncCalendar } from "./services/googleCalendar.js";
 
-// Minimal background worker. Real BullMQ workers land in phase 3 along with
-// redis; in dev we just poll:
+// Minimal background worker. Polls on a timer:
 //   - monitor every 30 min for proactive alerts
 //   - google calendar every 15 min (no-op if not connected)
 

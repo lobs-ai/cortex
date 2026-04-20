@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ChatCard, type ChatMessage } from "@/lib/api";
 import { Icon } from "@/components/Icon";
+import { Markdown } from "@/components/Markdown";
 
 const SUGGESTIONS = [
   "What should I focus on today?",
@@ -158,11 +159,11 @@ export default function ChatPage() {
               <div className="role">{m.role === "user" ? "you" : "cortex"}</div>
               <div className="body">
                 {m.error ? (
-                  <p style={{ color: "var(--danger, #c2410c)", border: "1px solid var(--danger, #c2410c)", borderRadius: 6, padding: "8px 10px", fontSize: 12 }}>
-                    <b>Chat error.</b> {m.content}
-                  </p>
+                  <div style={{ color: "var(--danger, #c2410c)", border: "1px solid var(--danger, #c2410c)", borderRadius: 6, padding: "8px 10px", fontSize: 12 }}>
+                    <b>Chat error.</b> <Markdown inline>{m.content}</Markdown>
+                  </div>
                 ) : (
-                  <p>{m.content}</p>
+                  <Markdown>{m.content}</Markdown>
                 )}
                 {m.cards?.map((c, j) => <ChatCardView key={j} card={c} />)}
               </div>
@@ -173,10 +174,8 @@ export default function ChatPage() {
             <div className="msg">
               <div className="role">cortex</div>
               <div className="body">
-                <p>
-                  {streaming.text}
-                  <span className="cursor" />
-                </p>
+                <Markdown>{streaming.text}</Markdown>
+                <span className="cursor" />
               </div>
             </div>
           )}

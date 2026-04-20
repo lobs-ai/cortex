@@ -1,4 +1,4 @@
-import { and, asc, eq, gte, lte } from "drizzle-orm";
+import { and, asc, eq, gte, lte, ne } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
 import type { EventCreateInput, EventPatchInput } from "../schemas/events.js";
@@ -23,7 +23,7 @@ export async function listEvents(
   userId: string,
   range?: { from?: Date; to?: Date },
 ) {
-  const conds = [eq(schema.events.userId, userId)];
+  const conds = [eq(schema.events.userId, userId), ne(schema.events.status, "cancelled")];
   if (range?.from) conds.push(gte(schema.events.startTime, range.from));
   if (range?.to) conds.push(lte(schema.events.startTime, range.to));
   const rows = await db
