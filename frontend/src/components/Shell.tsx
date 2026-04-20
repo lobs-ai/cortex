@@ -2,9 +2,11 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Icon, type IconName } from "./Icon";
 import { RightRail } from "./RightRail";
 import { SettingsModal } from "./SettingsModal";
+import { api } from "../lib/api";
 
 const TABS: { id: string; label: string; icon: IconName; k: string; path: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "dashboard", k: "1", path: "/" },
@@ -30,6 +32,28 @@ function activeTabFromPath(path: string) {
   return "dashboard";
 }
 
+const STATUS_REFETCH_MS = 2 * 60 * 1000;
+
+function formatAgo(ms: number): string {
+  if (ms < 0) ms = 0;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  return `${h}h ago`;
+}
+
+function formatIn(ms: number): string {
+  if (ms <= 0) return "due";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `in ${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `in ${m}m`;
+  const h = Math.floor(m / 60);
+  return `in ${h}h`;
+}
+
 export function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? "/";
   const router = useRouter();
@@ -41,6 +65,29 @@ export function Shell({ children }: { children: ReactNode }) {
   const [tweaksOpen, setTweaksOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState<Date | null>(null);
+
+  const { data: me } = useQuery({ queryKey: ["me"], queryFn: api.me });
+  const { data: integrations = [] } = useQuery({ queryKey: ["integrations"], queryFn: api.integrations.list });
+  const connectedCount = integrations.filter((i) => i.status === "connected").length;
+  const { data: status } = useQuery({
+    queryKey: ["status"],
+    queryFn: api.status,
+    refetchInterval: STATUS_REFETCH_MS,
+  });
+
+  const tick = now?.getTime() ?? 0;
+  const lastSyncedAt = status?.calendar.lastSyncedAt
+    ? new Date(status.calendar.lastSyncedAt).getTime()
+    : null;
+  const lastRunAt = status?.monitor.lastRunAt
+    ? new Date(status.monitor.lastRunAt).getTime()
+    : null;
+  const nextRunAt =
+    lastRunAt != null ? lastRunAt + (status?.monitor.intervalMs ?? 0) : null;
+  const syncedLabel =
+    tick && lastSyncedAt != null ? formatAgo(tick - lastSyncedAt) : null;
+  const nextRunLabel =
+    tick && nextRunAt != null ? formatIn(nextRunAt - tick) : null;
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -116,8 +163,12 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="topbar">
           <div className="left">
             <span><span className="dot" /><b>online</b> · cortex v0.3</span>
-            <span>synced <span className="mono">3m ago</span></span>
-            <span>next run <span className="mono">in 27m</span></span>
+            {syncedLabel && (
+              <span>synced <span className="mono">{syncedLabel}</span></span>
+            )}
+            {nextRunLabel && (
+              <span>next run <span className="mono">{nextRunLabel}</span></span>
+            )}
           </div>
           <div className="center mono">
             {now
@@ -135,10 +186,10 @@ export function Shell({ children }: { children: ReactNode }) {
             <span className="row gap-2">
               <Icon name="github" size={13} />
               <Icon name="discord" size={13} />
-              <span className="mono">3 integrations</span>
+              <span className="mono">{connectedCount} integration{connectedCount !== 1 ? "s" : ""}</span>
             </span>
             <span>⌘K</span>
-            <span className="caps" style={{ color: "var(--text)" }}>Rafe S.</span>
+            <span className="caps" style={{ color: "var(--text)" }}>{me?.name ?? ""}</span>
           </div>
         </div>
 

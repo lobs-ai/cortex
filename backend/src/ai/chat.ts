@@ -1,11 +1,13 @@
-import { complete } from "./client.js";
+import { completeWithTools, type ToolDef, type ToolHandler } from "./client.js";
 import { getActiveKey } from "../services/apiKeys.js";
 import { getProvider } from "./registry.js";
-import { listTasks } from "../services/tasks.js";
-import { listEvents } from "../services/events.js";
+import { listTasks, createTask, patchTask, deleteTask } from "../services/tasks.js";
+import { listEvents, createEvent, patchEvent, deleteEvent } from "../services/events.js";
 import { listProjects } from "../services/projects.js";
 import { listTendencies } from "../services/memory.js";
 import { getRoleModel } from "../services/settings.js";
+import { TaskCreate, TaskPatch } from "../schemas/tasks.js";
+import { EventCreate, EventPatch } from "../schemas/events.js";
 
 export type ChatCard =
   | { kind: "plan"; title: string; blocks: { start: string; end: string; label: string; task?: string; event?: string }[] }
@@ -19,6 +21,93 @@ export class ChatError extends Error {
     this.name = "ChatError";
   }
 }
+
+const CHAT_TOOLS: ToolDef[] = [
+  {
+    name: "create_task",
+    description: "Create a new task for the user.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Task title" },
+        description: { type: "string", description: "Optional notes" },
+        dueDate: { type: "string", description: "ISO-8601 date, e.g. 2026-04-21" },
+        priority: { type: "string", enum: ["P0", "P1", "P2"], description: "P0=urgent, P1=high, P2=normal" },
+        status: { type: "string", enum: ["inbox", "today", "doing", "done"] },
+        estimatedMinutes: { type: "number", description: "Estimated duration in minutes" },
+        projectId: { type: "string", description: "Project ID from context" },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "update_task",
+    description: "Update fields on an existing task.",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Task ID from context" },
+        title: { type: "string" },
+        description: { type: "string" },
+        dueDate: { type: "string", description: "ISO-8601 date or null to clear" },
+        priority: { type: "string", enum: ["P0", "P1", "P2"] },
+        status: { type: "string", enum: ["inbox", "today", "doing", "done"] },
+        estimatedMinutes: { type: "number" },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "delete_task",
+    description: "Delete a task by ID.",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Task ID from context" } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "create_event",
+    description: "Create a calendar event or time block.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Event title" },
+        startTime: { type: "string", description: "ISO-8601 datetime" },
+        endTime: { type: "string", description: "ISO-8601 datetime" },
+        description: { type: "string" },
+        kind: { type: "string", enum: ["meeting", "class", "teach", "personal", "deadline", "block"] },
+        important: { type: "boolean" },
+      },
+      required: ["title", "startTime", "endTime"],
+    },
+  },
+  {
+    name: "update_event",
+    description: "Update an existing calendar event.",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Event ID from context" },
+        title: { type: "string" },
+        startTime: { type: "string", description: "ISO-8601 datetime" },
+        endTime: { type: "string", description: "ISO-8601 datetime" },
+        description: { type: "string" },
+        kind: { type: "string", enum: ["meeting", "class", "teach", "personal", "deadline", "block"] },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "delete_event",
+    description: "Delete a calendar event by ID.",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Event ID from context" } },
+      required: ["id"],
+    },
+  },
+];
 
 export async function chatReply(userId: string, userText: string, history: { role: string; content: string }[]): Promise<ChatReply> {
   const cfg = await getRoleModel(userId, "chat");
@@ -53,37 +142,68 @@ export async function chatReply(userId: string, userText: string, history: { rol
   };
 
   const system = [
-    "You are Cortex, a personal AI executive assistant. Your job is to help the user get things done — not just answer questions, but actively help them move forward.",
+    "You are Cortex, a personal AI executive assistant. Your job is to help the user get things done — not just advise, but actually act.",
+    "",
+    "## What you can do",
+    "You have tools to create, update, and delete tasks and calendar events. Use them whenever the user asks you to add, change, or remove something. Don't ask for permission — just do it and confirm concisely.",
     "",
     "## Core behavior",
-    "- You are a planner and advisor, not an action-taker. You cannot create tasks, add calendar events, send messages, or modify any data. You can only generate text responses.",
-    "- NEVER say you have done something ('I've added...', 'Done! I created...', 'I've blocked off...'). You cannot take actions. Instead, tell the user exactly what to do or what you'd recommend, and be specific.",
-    "- Be directive, not passive. Your default is to propose a concrete, specific next step — not ask open-ended clarifying questions.",
-    "- When the user expresses a need, figure out what they want from context and deliver a clear recommendation. Don't make them spell out details you can infer.",
+    "- Be an executor. When the user asks for something to be done, do it with your tools, then confirm what you did in one sentence.",
+    "- When the user expresses a need, figure out the details from context and act. Don't make them spell out information you can infer.",
     "- Assume the user is competent and knows what they mean. Trust their intent rather than second-guessing it.",
     "- When you find a matching item in context, commit to it. Only ask which item they meant if there are genuinely multiple candidates with meaningfully different implications.",
-    "- Prefer a specific, opinionated proposal over an open-ended question. 'I'd add a 2-hour block tomorrow at 9 AM — here's how to set it up' beats 'What time works for you?'",
+    "- Prefer a specific, opinionated action over an open-ended question. Act first, then offer to adjust.",
     "",
     "## Scheduling and time",
-    "- When the user wants to block time, find an open slot in their calendar and propose it with a specific start time and duration. Never ask 'what time?' or 'how long?' when you can make a reasonable inference.",
-    "- When proposing work blocks, consider existing events, likely energy levels (mornings for deep work), and proximity to relevant deadlines.",
+    "- When the user wants to block time, look at their existing events in context to find an open slot, pick one, and create it. Use kind='block' for focused work sessions.",
+    "- When scheduling work blocks, prefer mornings for deep work and choose a duration that fits the task.",
     "",
     "## Tone and format",
-    "- Be concise. No unnecessary preamble, no restating what the user just said.",
-    "- Reference concrete items from context (task titles, event names, times) rather than speaking in vague generalities.",
-    "- Don't invent tasks, events, or deadlines not present in the context.",
-    "- Don't promise to take actions you can't actually execute — but do lay out a clear plan the user can act on.",
+    "- After using a tool, confirm what you did concisely. Don't be verbose.",
+    "- Reference concrete items from context (task titles, event names, times) rather than speaking in generalities.",
+    "- Don't invent tasks or events not in the context.",
     "",
     "Context is delivered as JSON below. Times are ISO-8601 in the user's timezone.",
     "",
     `CONTEXT:\n${JSON.stringify(context, null, 2)}`,
   ].join("\n");
 
-  let result: Awaited<ReturnType<typeof complete>>;
+  const toolHandlers: Record<string, ToolHandler> = {
+    create_task: async (input) => {
+      const parsed = TaskCreate.parse(input);
+      return createTask(userId, parsed);
+    },
+    update_task: async (input) => {
+      const { id, ...rest } = input as { id: string } & Record<string, unknown>;
+      const parsed = TaskPatch.parse(rest);
+      return patchTask(userId, id, parsed);
+    },
+    delete_task: async (input) => {
+      const { id } = input as { id: string };
+      await deleteTask(userId, id);
+      return { success: true };
+    },
+    create_event: async (input) => {
+      const parsed = EventCreate.parse(input);
+      return createEvent(userId, parsed);
+    },
+    update_event: async (input) => {
+      const { id, ...rest } = input as { id: string } & Record<string, unknown>;
+      const parsed = EventPatch.parse(rest);
+      return patchEvent(userId, id, parsed);
+    },
+    delete_event: async (input) => {
+      const { id } = input as { id: string };
+      await deleteEvent(userId, id);
+      return { success: true };
+    },
+  };
+
+  let result: Awaited<ReturnType<typeof completeWithTools>>;
   try {
-    result = await complete(userId, cfg.provider, cfg.model, {
+    result = await completeWithTools(userId, cfg.provider, cfg.model, {
       system,
-      maxTokens: 600,
+      maxTokens: 1500,
       messages: [
         ...history.slice(-8).map((h) => ({
           role: h.role === "user" ? ("user" as const) : ("assistant" as const),
@@ -91,7 +211,7 @@ export async function chatReply(userId: string, userText: string, history: { rol
         })),
         { role: "user" as const, content: userText },
       ],
-    });
+    }, CHAT_TOOLS, toolHandlers);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new ChatError(`Chat model (${cfg.provider}/${cfg.model}) failed: ${detail}`);

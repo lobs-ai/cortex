@@ -19,6 +19,7 @@ import { notificationRoutes } from "./routes/notifications.js";
 import { recurringRoutes } from "./routes/recurring.js";
 import { integrationsManageRoutes } from "./routes/integrations.js";
 import { settingsRoutes } from "./routes/settings.js";
+import { statusRoutes } from "./routes/status.js";
 
 const dev = env.CORTEX_ENV !== "production";
 const frontendDir = path.resolve(process.cwd(), "../frontend");
@@ -52,6 +53,7 @@ async function main() {
   await app.register(recurringRoutes);
   await app.register(integrationsManageRoutes);
   await app.register(settingsRoutes);
+  await app.register(statusRoutes);
 
   // Anything Fastify doesn't have a route for falls through to Next.js
   // (pages, static assets, _next/*).

@@ -114,6 +114,145 @@ export async function complete(
   };
 }
 
+export type ToolDef = {
+  name: string;
+  description: string;
+  input_schema: { type: "object"; properties: Record<string, unknown>; required?: string[] };
+};
+
+export type ToolHandler = (input: Record<string, unknown>) => Promise<unknown>;
+
+type AnyMsg = { role: "user" | "assistant"; content: unknown };
+
+export async function completeWithTools(
+  userId: string,
+  provider: ProviderId,
+  model: string,
+  req: CompletionRequest,
+  tools: ToolDef[],
+  toolHandlers: Record<string, ToolHandler>,
+): Promise<CompletionResult | null> {
+  const entry = getProvider(provider);
+  if (!entry) return null;
+
+  const apiKey = await getActiveKey(userId, provider);
+  if (entry.requiresApiKey && !apiKey) return null;
+
+  if (entry.transport === "anthropic") {
+    if (!apiKey) return null;
+    const anthro = getAnthropic(apiKey);
+    const msgs: AnyMsg[] = req.messages.map((m) => ({ role: m.role, content: m.content }));
+    let totalIn = 0, totalOut = 0;
+
+    for (let i = 0; i < 8; i++) {
+      const resp = await anthro.messages.create({
+        model,
+        max_tokens: req.maxTokens ?? 1500,
+        system: req.system,
+        messages: msgs as Parameters<typeof anthro.messages.create>[0]["messages"],
+        tools: tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          input_schema: t.input_schema as Anthropic.Tool["input_schema"],
+        })),
+      });
+
+      totalIn += resp.usage.input_tokens;
+      totalOut += resp.usage.output_tokens;
+
+      if (resp.stop_reason !== "tool_use") {
+        const text = resp.content
+          .filter((b): b is Anthropic.TextBlock => b.type === "text")
+          .map((b) => b.text)
+          .join("\n");
+        return { text: stripReasoning(text), usage: { in: totalIn, out: totalOut } };
+      }
+
+      msgs.push({ role: "assistant", content: resp.content });
+
+      const toolUseBlocks = resp.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+      );
+      const toolResults: Anthropic.ToolResultBlockParam[] = await Promise.all(
+        toolUseBlocks.map(async (block) => {
+          const handler = toolHandlers[block.name];
+          let result: unknown;
+          try {
+            result = handler
+              ? await handler(block.input as Record<string, unknown>)
+              : { error: `Unknown tool: ${block.name}` };
+          } catch (err) {
+            result = { error: err instanceof Error ? err.message : String(err) };
+          }
+          return { type: "tool_result" as const, tool_use_id: block.id, content: JSON.stringify(result) };
+        }),
+      );
+      msgs.push({ role: "user", content: toolResults });
+    }
+    return null;
+  }
+
+  // OpenAI-compatible
+  const baseUrl = entry.baseUrl ?? (entry.transport === "openai" ? "https://api.openai.com/v1" : "");
+  if (!baseUrl) return null;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  if (provider === "openrouter") headers["X-Title"] = "cortex";
+
+  type OAIToolCall = { id: string; type: string; function: { name: string; arguments: string } };
+  type OAIMessage = { role: string; content?: string | null; tool_calls?: OAIToolCall[]; tool_call_id?: string };
+  const msgs: OAIMessage[] = [{ role: "system", content: req.system }, ...req.messages];
+  let totalIn = 0, totalOut = 0;
+
+  for (let i = 0; i < 8; i++) {
+    const res = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        max_tokens: req.maxTokens ?? 1500,
+        messages: msgs,
+        tools: tools.map((t) => ({
+          type: "function",
+          function: { name: t.name, description: t.description, parameters: t.input_schema },
+        })),
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      throw new Error(`${provider} ${res.status}: ${errText.slice(0, 200)}`);
+    }
+    const json = (await res.json()) as {
+      choices?: Array<{ message?: OAIMessage; finish_reason?: string }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    totalIn += json.usage?.prompt_tokens ?? 0;
+    totalOut += json.usage?.completion_tokens ?? 0;
+
+    const choice = json.choices?.[0];
+    if (!choice?.message) return null;
+
+    if (choice.finish_reason !== "tool_calls" || !choice.message.tool_calls?.length) {
+      return { text: stripReasoning(choice.message.content ?? ""), usage: { in: totalIn, out: totalOut } };
+    }
+
+    msgs.push(choice.message);
+    for (const call of choice.message.tool_calls) {
+      const handler = toolHandlers[call.function.name];
+      let result: unknown;
+      try {
+        const input = JSON.parse(call.function.arguments) as Record<string, unknown>;
+        result = handler ? await handler(input) : { error: `Unknown tool: ${call.function.name}` };
+      } catch (err) {
+        result = { error: err instanceof Error ? err.message : String(err) };
+      }
+      msgs.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+    }
+  }
+  return null;
+}
+
 // Legacy shim — some older code paths still ask for a raw Anthropic client.
 // Returns null if no anthropic key is stored and the user hasn't set
 // ANTHROPIC_API_KEY either.

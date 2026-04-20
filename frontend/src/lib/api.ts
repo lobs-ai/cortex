@@ -360,6 +360,12 @@ export const api = {
       }>("/api/chat", { method: "POST", body: JSON.stringify({ text, conversationId }) }),
   },
   me: () => req<{ id: string; email: string; name: string; timezone: string }>("/api/me"),
+  status: () =>
+    req<{
+      now: string;
+      monitor: { lastRunAt: string | null; intervalMs: number };
+      calendar: { lastSyncedAt: string | null; intervalMs: number };
+    }>("/api/status"),
   settings: {
     get: () => req<Record<string, { provider: string; model: string }>>("/api/settings"),
     providers: () =>
