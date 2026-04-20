@@ -297,6 +297,7 @@ export const api = {
           requiresApiKey: boolean;
           keyEnvVar: string;
           keyPresent: boolean;
+          storedKeyCount: number;
           models: { id: string; label: string; note?: string }[];
         }[];
         roles: { id: string; label: string; note: string }[];
@@ -306,5 +307,31 @@ export const api = {
         method: "PUT",
         body: JSON.stringify(body),
       }),
+    discoverModels: (provider: string) =>
+      req<{ provider: string; models: { id: string; label: string; note?: string }[] }>(
+        `/api/settings/providers/${encodeURIComponent(provider)}/models`,
+      ),
+    keys: {
+      list: () =>
+        req<StoredKey[]>("/api/settings/keys"),
+      add: (body: { provider: string; label: string; key: string }) =>
+        req<StoredKey>("/api/settings/keys", {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+      remove: (id: string) =>
+        req<{ ok: boolean }>(`/api/settings/keys/${id}`, { method: "DELETE" }),
+      activate: (id: string) =>
+        req<{ ok: boolean }>(`/api/settings/keys/${id}/activate`, { method: "POST" }),
+    },
   },
+};
+
+export type StoredKey = {
+  id: string;
+  provider: string;
+  label: string;
+  masked: string;
+  isActive: boolean;
+  createdAt: string;
 };

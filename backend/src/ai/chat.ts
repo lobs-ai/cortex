@@ -1,4 +1,6 @@
-import { llmClient } from "./client.js";
+import { complete } from "./client.js";
+import { getActiveKey } from "../services/apiKeys.js";
+import { getProvider } from "./registry.js";
 import { listTasks } from "../services/tasks.js";
 import { listEvents } from "../services/events.js";
 import { listProjects } from "../services/projects.js";
@@ -61,8 +63,13 @@ function cannedReply(userText: string): ChatReply {
 }
 
 export async function chatReply(userId: string, userText: string, history: { role: string; content: string }[]): Promise<ChatReply> {
-  const client = llmClient();
-  if (!client) return cannedReply(userText);
+  const cfg = await getRoleModel(userId, "chat");
+  const entry = getProvider(cfg.provider);
+  if (!entry) return cannedReply(userText);
+  if (entry.requiresApiKey) {
+    const key = await getActiveKey(userId, cfg.provider);
+    if (!key) return cannedReply(userText);
+  }
 
   const [tasks, events, projects, tendencies] = await Promise.all([
     listTasks(userId),
@@ -88,29 +95,23 @@ export async function chatReply(userId: string, userText: string, history: { rol
     `CONTEXT:\n${JSON.stringify(context, null, 2)}`,
   ].join("\n");
 
-  const cfg = await getRoleModel(userId, "chat");
-  // Only Anthropic is wired right now; if the user picked another provider the
-  // SDK call still uses Anthropic's API with whatever model string they chose —
-  // this is a clear "Phase 2" hook point for openai/openrouter adapters.
   try {
-    const resp = await client.messages.create({
-      model: cfg.model,
-      max_tokens: 600,
+    const result = await complete(userId, cfg.provider, cfg.model, {
       system,
+      maxTokens: 600,
       messages: [
-        ...history.slice(-8).map((h) => ({ role: h.role === "user" ? ("user" as const) : ("assistant" as const), content: h.content })),
+        ...history.slice(-8).map((h) => ({
+          role: h.role === "user" ? ("user" as const) : ("assistant" as const),
+          content: h.content,
+        })),
         { role: "user" as const, content: userText },
       ],
     });
-    const text = resp.content
-      .filter((b): b is { type: "text"; text: string } => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
+    if (!result) return cannedReply(userText);
     return {
-      text: text || cannedReply(userText).text,
+      text: result.text || cannedReply(userText).text,
       cards: [],
-      usage: { in: resp.usage.input_tokens, out: resp.usage.output_tokens },
+      usage: result.usage,
     };
   } catch (err) {
     console.error("llm error, falling back to canned:", err);

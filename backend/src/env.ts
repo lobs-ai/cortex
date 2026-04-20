@@ -18,4 +18,3 @@ export const env = {
 };
 
 export const isPostgres = env.DATABASE_URL.startsWith("postgres");
-export const hasLLM = !!env.ANTHROPIC_API_KEY;

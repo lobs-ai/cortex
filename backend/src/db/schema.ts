@@ -223,6 +223,17 @@ export const recurringSuggestions = sqliteTable("recurring_suggestions", {
   dismissedAt: integer("dismissed_at", { mode: "timestamp_ms" }),
 });
 
+export const providerApiKeys = sqliteTable("provider_api_keys", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  provider: text("provider").notNull(),
+  label: text("label").notNull(),
+  keyEncrypted: text("key_encrypted").notNull(),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const scheduledBlocks = sqliteTable("scheduled_blocks", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),

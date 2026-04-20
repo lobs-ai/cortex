@@ -217,6 +217,17 @@ CREATE TABLE IF NOT EXISTS recurring_suggestions (
   dismissed_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS provider_api_keys (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  label TEXT NOT NULL,
+  key_encrypted TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_blocks (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,

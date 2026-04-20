@@ -1,7 +1,9 @@
 import { findFreeBlocks } from "../services/scheduling.js";
 import { listEvents } from "../services/events.js";
 import { listTasks } from "../services/tasks.js";
-import { llmClient } from "./client.js";
+import { complete } from "./client.js";
+import { getActiveKey } from "../services/apiKeys.js";
+import { getProvider } from "./registry.js";
 import { getRoleModel } from "../services/settings.js";
 
 export type PlanBlock = { start: string; end: string; label: string; sub?: string; kind: string; hero?: boolean };
@@ -14,10 +16,13 @@ export async function generateDailyPlan(userId: string, date: Date): Promise<Dai
     findFreeBlocks(userId, date, { minMinutes: 30 }),
   ]);
 
-  const client = llmClient();
-  if (!client) return heuristicPlan(events, tasks, free);
-
   const cfg = await getRoleModel(userId, "planner");
+  const entry = getProvider(cfg.provider);
+  if (!entry) return heuristicPlan(events, tasks, free);
+  if (entry.requiresApiKey) {
+    const key = await getActiveKey(userId, cfg.provider);
+    if (!key) return heuristicPlan(events, tasks, free);
+  }
 
   const context = {
     date: date.toISOString().slice(0, 10),
@@ -38,18 +43,19 @@ export async function generateDailyPlan(userId: string, date: Date): Promise<Dai
     "- Keep summary under 160 chars. Return JSON only.";
 
   try {
-    const resp = await client.messages.create({
-      model: cfg.model,
-      max_tokens: 800,
+    const result = await complete(userId, cfg.provider, cfg.model, {
       system,
-      messages: [{ role: "user", content: `CONTEXT:\n${JSON.stringify(context, null, 2)}` }],
+      maxTokens: 800,
+      messages: [
+        { role: "user", content: `CONTEXT:\n${JSON.stringify(context, null, 2)}` },
+      ],
     });
-    const text = resp.content.filter((b) => b.type === "text").map((b) => (b as { text: string }).text).join("");
+    const text = result?.text ?? "";
     const jsonStart = text.indexOf("{");
     const jsonEnd = text.lastIndexOf("}");
     if (jsonStart >= 0 && jsonEnd > jsonStart) {
       const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
-      return { summary: parsed.summary, blocks: parsed.blocks ?? [], generatedBy: `planner:${cfg.model}` };
+      return { summary: parsed.summary, blocks: parsed.blocks ?? [], generatedBy: `planner:${cfg.provider}/${cfg.model}` };
     }
   } catch (err) {
     console.error("planner LLM failure; using heuristic:", err);

@@ -8,6 +8,7 @@ import {
   type RoleId,
   type ProviderId,
 } from "../ai/registry.js";
+import { countKeysPerProvider } from "./apiKeys.js";
 
 export type RoleConfig = { provider: ProviderId; model: string };
 export type Settings = Record<RoleId, RoleConfig>;
@@ -68,16 +69,22 @@ export async function setRoleConfig(userId: string, role: RoleId, cfg: RoleConfi
   }
 }
 
-export function getRegistry() {
+export async function getRegistry(userId: string) {
+  const stored = await countKeysPerProvider(userId);
   return {
-    providers: PROVIDERS.map((p) => ({
-      id: p.id,
-      label: p.label,
-      requiresApiKey: p.requiresApiKey,
-      keyEnvVar: p.keyEnvVar,
-      keyPresent: p.keyEnvVar ? Boolean(process.env[p.keyEnvVar]) : true,
-      models: p.models,
-    })),
+    providers: PROVIDERS.map((p) => {
+      const envPresent = p.keyEnvVar ? Boolean(process.env[p.keyEnvVar]) : false;
+      const storedCount = stored[p.id] ?? 0;
+      return {
+        id: p.id,
+        label: p.label,
+        requiresApiKey: p.requiresApiKey,
+        keyEnvVar: p.keyEnvVar,
+        keyPresent: !p.requiresApiKey || envPresent || storedCount > 0,
+        storedKeyCount: storedCount,
+        models: p.models,
+      };
+    }),
     roles: ROLES.map((r) => ({ id: r.id, label: r.label, note: r.note })),
   };
 }
