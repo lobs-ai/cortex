@@ -1,5 +1,12 @@
 import { rawDb } from "./client.js";
 
+// Exported so the server can apply the schema at boot (idempotent — every
+// statement is `IF NOT EXISTS`). Running this file directly via `npm run
+// db:push` still works thanks to the side-effect call at the bottom.
+export function applySchema(): void {
+  rawDb.exec(DDL);
+}
+
 const DDL = `
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
@@ -19,6 +26,17 @@ CREATE TABLE IF NOT EXISTS integrations (
   status TEXT NOT NULL DEFAULT 'available',
   detail TEXT,
   last_synced_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS integration_configs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  field TEXT NOT NULL,
+  value_encrypted TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (user_id, provider, field)
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -241,11 +259,15 @@ CREATE TABLE IF NOT EXISTS scheduled_blocks (
   created_at INTEGER NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_integration_configs_lookup ON integration_configs (user_id, provider, field);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_events_user_start ON events (user_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON assistant_messages (conversation_id, created_at);
 `;
 
-rawDb.exec(DDL);
+// Direct run: `npm run db:push` invokes this file via tsx, so do the apply.
+// When imported by server.ts this block still runs at import time, which is
+// what we want — boot-time schema apply.
+applySchema();
 console.log("schema applied");

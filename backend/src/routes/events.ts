@@ -62,6 +62,9 @@ export async function eventRoutes(app: FastifyInstance) {
       if (msg === "not_connected") {
         return reply.code(400).send({ error: "not_connected" });
       }
+      if (msg === "feature_disabled") {
+        return reply.code(400).send({ error: "feature_disabled" });
+      }
       if (msg === "google_oauth_not_configured") {
         return reply.code(501).send({ error: "google_oauth_not_configured" });
       }

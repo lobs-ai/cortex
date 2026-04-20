@@ -28,6 +28,10 @@ services:
     restart: unless-stopped
     env_file: ../.env
     environment:
+      # Force production regardless of .env — the prod image ships the
+      # prebuilt Next bundle and doesn't carry dev-mode loaders.
+      CORTEX_ENV: "production"
+      NODE_ENV: "production"
       PORT: "9009"
       DATABASE_URL: postgresql://cortex:cortex@postgres:5432/cortex
       REDIS_URL: redis://redis:6379/0

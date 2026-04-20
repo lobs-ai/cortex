@@ -29,7 +29,12 @@ async function calendarTick() {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg === "not_connected" || msg === "google_oauth_not_configured") return;
+    if (
+      msg === "not_connected" ||
+      msg === "feature_disabled" ||
+      msg === "google_oauth_not_configured"
+    )
+      return;
     console.error("calendar sync error:", err);
   }
 }

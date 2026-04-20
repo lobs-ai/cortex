@@ -24,7 +24,19 @@ export default function DashboardPage() {
     .sort((a, b) => a.priority.localeCompare(b.priority));
 
   const openTasks = tasks.filter((t) => t.status !== "done");
-  const doneToday = tasks.filter((t) => t.status === "done").length;
+  const isToday = (iso: string | null) => {
+    if (!iso) return false;
+    const d = new Date(iso);
+    const n = new Date();
+    return (
+      d.getFullYear() === n.getFullYear() &&
+      d.getMonth() === n.getMonth() &&
+      d.getDate() === n.getDate()
+    );
+  };
+  const doneToday = tasks.filter((t) => t.status === "done" && isToday(t.completedAt)).length;
+  const plannedToday =
+    doneToday + tasks.filter((t) => t.status === "today" || t.status === "doing").length;
   const overdue = openTasks.filter((t) => t.due && new Date(t.due) < new Date()).length;
   const p0 = openTasks.filter((t) => t.priority === "P0").length;
   const p1 = openTasks.filter((t) => t.priority === "P1").length;
@@ -74,9 +86,15 @@ export default function DashboardPage() {
           <div className="k">Completed today</div>
           <div className="v">
             {doneToday}
-            <span className="muted" style={{ fontSize: 14, marginLeft: 4 }}>/ 8</span>
+            <span className="muted" style={{ fontSize: 14, marginLeft: 4 }}>
+              / {plannedToday}
+            </span>
           </div>
-          <div className="s">on pace for 9 · est</div>
+          <div className="s">
+            {plannedToday === 0
+              ? "no tasks planned"
+              : `${plannedToday - doneToday} remaining`}
+          </div>
         </div>
         <div className="stat">
           <div className="k">Focus block</div>

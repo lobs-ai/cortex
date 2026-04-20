@@ -6,7 +6,12 @@ import * as schema from "./schema.js";
 
 // SQLite dev fallback. The design doc targets Postgres; swap the driver
 // (drizzle-orm/node-postgres) once DATABASE_URL points at Postgres.
-const dbPath = path.resolve(process.cwd(), "cortex.db");
+//
+// Tests set CORTEX_DB_PATH to an isolated tmp file so they don't stomp
+// the dev database. In-process callers can also pass `:memory:`.
+const dbPath = process.env.CORTEX_DB_PATH
+  ? path.resolve(process.env.CORTEX_DB_PATH)
+  : path.resolve(process.cwd(), "cortex.db");
 const sqlite = new Database(dbPath);
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");

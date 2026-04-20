@@ -2,7 +2,9 @@ import { google } from "googleapis";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
-import { GOOGLE_CALENDAR_PROVIDER, getAuthedClient } from "./googleAuth.js";
+import { getAuthedClient, isFeatureEnabled } from "./googleAuth.js";
+
+const GOOGLE_CALENDAR_PROVIDER = "google_calendar";
 
 // Pull the user's primary calendar and upsert into the events table. The
 // `events` table already has (externalId, provider) for exactly this use.
@@ -40,6 +42,9 @@ export async function syncCalendar(userId: string): Promise<{
 }> {
   const authed = await getAuthedClient(userId);
   if (!authed) throw new Error("not_connected");
+  if (!(await isFeatureEnabled(userId, "google_calendar"))) {
+    throw new Error("feature_disabled");
+  }
 
   const from = new Date(Date.now() - WINDOW_PAST_MS);
   const to = new Date(Date.now() + WINDOW_FUTURE_MS);
@@ -127,13 +132,24 @@ export async function syncCalendar(userId: string): Promise<{
     }
   }
 
+  // Stamp lastSyncedAt on BOTH the master (for freshness tracking) and the
+  // google_calendar feature row (what the UI displays per-feature).
   await db
     .update(schema.integrations)
     .set({ lastSyncedAt: now })
     .where(
       and(
         eq(schema.integrations.userId, userId),
-        eq(schema.integrations.id, authed.integrationId),
+        eq(schema.integrations.id, authed.masterId),
+      ),
+    );
+  await db
+    .update(schema.integrations)
+    .set({ lastSyncedAt: now })
+    .where(
+      and(
+        eq(schema.integrations.userId, userId),
+        eq(schema.integrations.provider, GOOGLE_CALENDAR_PROVIDER),
       ),
     );
 

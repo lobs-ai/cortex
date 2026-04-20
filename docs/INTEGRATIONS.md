@@ -1,10 +1,31 @@
 # Integrations — setup guide
 
-Cortex wires external systems (calendar, chat, code hosting) through OAuth or
-API tokens. Today **Google Calendar** is the only provider with a real OAuth
-flow; the rest are record-only placeholders in the Settings → Integrations tab.
+The easiest way to set up any integration is **in the app**: open Settings →
+Integrations, expand the provider you want, follow the numbered steps, paste
+your credentials, and hit Save. Each provider has the full walkthrough
+(including direct links to the vendor's setup pages) inline.
 
-This doc walks through connecting Google Calendar end-to-end.
+This doc is the same walkthrough in text form, useful for reference or if you
+need to bring up an integration before the UI is available.
+
+## What's actually live vs. saved-only
+
+| Provider | Status |
+|---|---|
+| Google Calendar | **Live** — OAuth + 15-min sync |
+| Gmail | Saved-only (consent granted; sync coming) |
+| Google Drive | Saved-only (consent granted; sync coming) |
+| Discord | Saved-only |
+| GitHub | Saved-only |
+| Slack | Saved-only |
+| Notion | Saved-only |
+| Linear | Saved-only |
+
+**Saved-only** means: credentials are accepted, encrypted, and stored. The
+worker will start using them once per-provider sync ships.
+
+Credentials are AES-256-GCM encrypted with `ENCRYPTION_KEY` before being
+written. If you change `ENCRYPTION_KEY` you'll need to re-enter them.
 
 ---
 
@@ -56,31 +77,28 @@ In the project, open **APIs & Services → Library** and enable:
 
 Hit **Create**. Copy the **Client ID** and **Client secret**.
 
-### 5. Paste credentials into `.env`
+### 5. Paste credentials in the app
 
-In the repo root, edit `.env` (copy from `.env.example` if you haven't):
+Open **Settings → Integrations → Google**, paste the **Client ID** and
+**Client Secret** into the fields, and hit **Save credentials**. No backend
+restart needed — config lives in the database, AES-GCM encrypted.
 
-```env
-GOOGLE_CLIENT_ID=<paste client id>
-GOOGLE_CLIENT_SECRET=<paste client secret>
-GOOGLE_REDIRECT_URI=http://localhost:9009/api/integrations/google/callback
-ENCRYPTION_KEY=<any string — tokens are AES-GCM encrypted with this key>
-```
-
-Restart the backend so the new env vars are loaded.
+(If you prefer, you can also set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+in `.env` — the app uses env values as a fallback when no per-user config
+is saved.)
 
 ### 6. Connect
 
-1. Open the app, click the gear icon, open **Settings → Integrations**.
-2. Click **Connect Google Calendar**. A Google popup opens.
-3. Pick your Google account, grant the read-only calendar + email scopes.
-4. The popup closes; the integration row shows your email and status
-   `connected`.
-5. An initial sync kicks off in the background. Events from the next 60 days
-   (and last 24h) will appear in Cortex within a few seconds.
+1. Click **Connect Google**. A popup opens.
+2. Pick your Google account, grant the calendar + gmail + drive + email
+   scopes.
+3. The popup closes; the card shows your email and status `connected`.
+4. An initial calendar sync kicks off in the background — events from the
+   last day and the next 60 days appear within a few seconds.
 
-The background worker re-syncs every 15 minutes. You can also click
-**Sync now** on the integration row to force a pull.
+The background worker re-syncs every 15 minutes. Use **Sync calendar now**
+to force a pull. Use the per-product toggles (Calendar / Gmail / Drive) to
+turn individual features off without revoking OAuth.
 
 ---
 
@@ -115,9 +133,21 @@ The background worker re-syncs every 15 minutes. You can also click
 
 ---
 
-## Other integrations
+## Other integrations (Discord, GitHub, Slack, Notion, Linear)
 
-Gmail, Google Drive, Discord, GitHub, Slack, Notion, and Linear are currently
-**record-only** in the Settings UI. You can track that an integration exists
-and toggle its status, but Cortex doesn't actually call those services yet.
-OAuth flows for them will land as individual phases.
+Each has a setup wizard in **Settings → Integrations**. The in-app steps are
+the source of truth, but briefly:
+
+- **Discord** — Developer Portal → new app → add a bot → copy the bot token
+  and your Discord user ID.
+- **GitHub** — fine-grained personal access token with Issues/PRs/Contents
+  read access to the repos you care about.
+- **Slack** — new Slack app → add bot scopes (`chat:write`, etc.) → install
+  to workspace → copy the `xoxb-` bot token.
+- **Notion** — create an internal integration, share the pages/databases
+  you want to expose, copy the `secret_` token.
+- **Linear** — Settings → API → new personal API key (`lin_api_…`).
+
+Credentials are stored encrypted. Active sync for these lands per-provider
+in a later release; the wizards exist so your creds are ready the moment it
+ships.

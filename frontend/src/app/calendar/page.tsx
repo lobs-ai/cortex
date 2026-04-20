@@ -205,12 +205,18 @@ function WeekGrid({
   eventsByDay: Map<number, Event[]>;
   weekOffset: number;
 }) {
-  const days = [-3, -2, -1, 0, 1, 2, 3].map((d) => {
-    const dt = new Date(today);
-    dt.setDate(dt.getDate() + d + weekOffset * 7);
-    dt.setHours(0, 0, 0, 0);
-    return dt;
-  });
+  const days = useMemo(() => {
+    const ref = new Date(today);
+    ref.setDate(ref.getDate() + weekOffset * 7);
+    const sunday = new Date(ref);
+    sunday.setDate(ref.getDate() - ref.getDay());
+    sunday.setHours(0, 0, 0, 0);
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(sunday);
+      d.setDate(sunday.getDate() + i);
+      return d;
+    });
+  }, [today, weekOffset]);
   const scrollRef = useRef<HTMLDivElement>(null);
   useAutoScrollToNow(scrollRef);
 

@@ -27,6 +27,18 @@ export const integrations = sqliteTable("integrations", {
   lastSyncedAt: integer("last_synced_at", { mode: "timestamp_ms" }),
 });
 
+// Per-user, per-provider key/value config. Holds OAuth client IDs, API keys,
+// PATs, bot tokens, etc. Values are AES-GCM encrypted.
+export const integrationConfigs = sqliteTable("integration_configs", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  provider: text("provider").notNull(),
+  field: text("field").notNull(),
+  valueEncrypted: text("value_encrypted").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),

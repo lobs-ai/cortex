@@ -34,6 +34,12 @@ COPY --from=frontend-build /app/frontend/.next          ./.next
 COPY --from=frontend-build /app/frontend/node_modules   ./node_modules
 COPY --from=frontend-build /app/frontend/package.json   ./
 COPY --from=frontend-build /app/frontend/next.config.mjs ./
+# Next.js custom server still calls findPagesDir() at runtime, which checks
+# the filesystem for app/ or pages/. Without these the app crashes on boot
+# with "Couldn't find any `pages` or `app` directory".
+COPY --from=frontend-build /app/frontend/src            ./src
+COPY --from=frontend-build /app/frontend/tsconfig.json  ./
+COPY --from=frontend-build /app/frontend/next-env.d.ts  ./
 
 WORKDIR /app/backend
 COPY --from=backend-build /app/backend/node_modules ./node_modules

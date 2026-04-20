@@ -4,6 +4,10 @@ import sensible from "@fastify/sensible";
 import path from "node:path";
 import next from "next";
 import { env } from "./env.js";
+// Side-effect import: applies `CREATE TABLE IF NOT EXISTS …` for every table
+// on boot. Makes `docker compose up` work on a fresh volume without a
+// separate `npm run db:push` step.
+import "./db/push.js";
 import { meRoutes } from "./routes/me.js";
 import { taskRoutes } from "./routes/tasks.js";
 import { eventRoutes } from "./routes/events.js";

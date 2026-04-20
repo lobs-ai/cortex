@@ -4,7 +4,7 @@ const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
+    headers: { ...(init?.body != null ? { "Content-Type": "application/json" } : {}), ...(init?.headers || {}) },
     cache: "no-store",
   });
   if (!res.ok) {
@@ -325,6 +325,25 @@ export const api = {
         "/api/calendar/sync",
         { method: "POST" },
       ),
+    disconnectGoogle: () =>
+      req<{ ok: boolean }>("/api/integrations/google/disconnect", { method: "POST" }),
+    getConfig: (provider: string) =>
+      req<{
+        provider: string;
+        fields: Record<string, { present: true; masked: string; length: number }>;
+      }>(`/api/integrations/configs/${encodeURIComponent(provider)}`),
+    putConfig: (provider: string, fields: Record<string, string | null>) =>
+      req<{
+        provider: string;
+        fields: Record<string, { present: true; masked: string; length: number }>;
+      }>(`/api/integrations/configs/${encodeURIComponent(provider)}`, {
+        method: "PUT",
+        body: JSON.stringify({ fields }),
+      }),
+    clearConfig: (provider: string) =>
+      req<{ ok: boolean }>(`/api/integrations/configs/${encodeURIComponent(provider)}`, {
+        method: "DELETE",
+      }),
   },
   chat: {
     send: (text: string, conversationId?: string) =>

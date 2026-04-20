@@ -3,6 +3,11 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Integration, type StoredKey } from "@/lib/api";
+import {
+  INTEGRATION_SPECS,
+  type ConfigField,
+  type IntegrationSpec,
+} from "@/lib/integrationSpecs";
 import { Icon } from "./Icon";
 
 type Cfg = { provider: string; model: string };
@@ -520,132 +525,406 @@ function ProviderKeyBlock({
 
 // ── Integrations ────────────────────────────────────────────────────────────
 
-const INTEGRATION_OPTIONS = [
-  { id: "google_calendar", label: "Google Calendar" },
-  { id: "gmail", label: "Gmail" },
-  { id: "google_drive", label: "Google Drive" },
-  { id: "discord", label: "Discord" },
-  { id: "github", label: "GitHub" },
-  { id: "slack", label: "Slack" },
-  { id: "notion", label: "Notion" },
-  { id: "linear", label: "Linear" },
-];
-
-function integrationLabel(p: string): string {
-  return INTEGRATION_OPTIONS.find((o) => o.id === p)?.label ?? p;
-}
-
 function IntegrationsPane() {
   const qc = useQueryClient();
   const { data: integrations = [] } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
-  const { data: googleStatus } = useQuery({
-    queryKey: ["integrations-google-status"],
-    queryFn: () => api.integrations.googleStatus(),
-  });
-  const [editing, setEditing] = useState<Integration | null>(null);
-  const [adding, setAdding] = useState(false);
-
   const refetch = () => qc.invalidateQueries({ queryKey: ["integrations"] });
-
-  const google = integrations.find((i) => i.provider === "google_calendar");
-  const manual = integrations.filter((i) => i.provider !== "google_calendar");
-  // Manual "record status" add flow excludes google_calendar — it has its own
-  // OAuth button.
-  const manualOptions = INTEGRATION_OPTIONS.filter((o) => o.id !== "google_calendar");
-  const present = new Set(manual.map((i) => i.provider));
-  const missing = manualOptions.filter((o) => !present.has(o.id));
+  const [expandedId, setExpandedId] = useState<string | null>("google");
 
   return (
-    <div className="panel-bd" style={{ display: "grid", gap: 14 }}>
-      <div className="muted" style={{ fontSize: 11.5 }}>
-        External systems Cortex can read from or post to. Google Calendar uses
-        real OAuth; the others are record-only until their flows ship.
+    <div className="panel-bd" style={{ display: "grid", gap: 10 }}>
+      <div className="muted" style={{ fontSize: 11.5, paddingBottom: 4 }}>
+        Everything you need to connect external systems is right here. Follow the
+        steps, paste your credentials, and Cortex takes it from there. Live =
+        sync is running. Saved-only = credentials stored; sync lands in a later
+        release.
       </div>
 
-      <GoogleCalendarBlock
-        integration={google ?? null}
-        configured={googleStatus?.configured ?? false}
-        onChanged={refetch}
-      />
+      {INTEGRATION_SPECS.map((spec) => (
+        <IntegrationCard
+          key={spec.id}
+          spec={spec}
+          integrations={integrations}
+          expanded={expandedId === spec.id}
+          onToggleExpand={() =>
+            setExpandedId((cur) => (cur === spec.id ? null : spec.id))
+          }
+          onChanged={refetch}
+        />
+      ))}
+    </div>
+  );
+}
 
-      <div style={{ border: "1px solid var(--hair)", background: "var(--bg)" }}>
-        <div
+function IntegrationCard({
+  spec,
+  integrations,
+  expanded,
+  onToggleExpand,
+  onChanged,
+}: {
+  spec: IntegrationSpec;
+  integrations: Integration[];
+  expanded: boolean;
+  onToggleExpand: () => void;
+  onChanged: () => void;
+}) {
+  const rows = integrations.filter((i) =>
+    spec.features.some((f) => f.id === i.provider),
+  );
+  const anyConnected = rows.some((r) => r.status === "connected");
+
+  // Summary status text shown collapsed
+  let statusText: string;
+  let statusColor: "green" | "yellow" | "muted";
+  if (spec.oauth) {
+    const masterRow = integrations.find((i) => i.provider === spec.configProvider);
+    if (masterRow?.status === "connected") {
+      statusText = masterRow.detail ? `connected · ${masterRow.detail}` : "connected";
+      statusColor = "green";
+    } else {
+      statusText = "not connected";
+      statusColor = "muted";
+    }
+  } else if (anyConnected) {
+    statusText = "credentials saved";
+    statusColor = "yellow";
+  } else {
+    statusText = "not configured";
+    statusColor = "muted";
+  }
+
+  return (
+    <div style={{ border: "1px solid var(--hair)", background: "var(--bg)" }}>
+      <button
+        type="button"
+        onClick={onToggleExpand}
+        style={{
+          width: "100%",
+          display: "grid",
+          gridTemplateColumns: "auto 1fr auto auto",
+          gap: 10,
+          alignItems: "center",
+          padding: "10px 12px",
+          background: "transparent",
+          border: "none",
+          textAlign: "left",
+          cursor: "pointer",
+          color: "var(--text)",
+        }}
+      >
+        <Icon name={expanded ? "chevD" : "chevR"} size={11} />
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 500 }}>{spec.label}</div>
+          <div className="muted" style={{ fontSize: 11 }}>{spec.summary}</div>
+        </div>
+        <span
+          className="chip"
           style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "8px 12px",
-            borderBottom: "1px solid var(--hair)",
+            color:
+              statusColor === "green"
+                ? "var(--green)"
+                : statusColor === "yellow"
+                  ? "var(--yellow, #eab308)"
+                  : "var(--muted)",
+            borderColor:
+              statusColor === "green"
+                ? "color-mix(in oklch, var(--green), transparent 70%)"
+                : statusColor === "yellow"
+                  ? "color-mix(in oklch, var(--yellow, #eab308), transparent 70%)"
+                  : "var(--hair-2)",
           }}
         >
-          <div style={{ fontSize: 12.5, fontWeight: 500 }}>Other integrations</div>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => setAdding(true)}
-            disabled={missing.length === 0}
-            title={missing.length === 0 ? "All other integrations are already added" : undefined}
-          >
-            + Add
-          </button>
-        </div>
-        {manual.length === 0 ? (
-          <div className="muted" style={{ padding: "12px", fontSize: 11.5 }}>
-            No manual integrations recorded. Click <b>Add</b> to track one.
-          </div>
-        ) : (
-          manual.map((it) => (
-            <IntegrationRow
-              key={it.id}
-              integration={it}
-              onEdit={() => setEditing(it)}
-              onChanged={refetch}
+          {statusText}
+        </span>
+        <span className="caps muted" style={{ fontSize: 10 }}>
+          {expanded ? "hide" : "setup"}
+        </span>
+      </button>
+
+      {expanded && (
+        <div
+          style={{
+            borderTop: "1px solid var(--hair)",
+            padding: "14px 12px 16px",
+            display: "grid",
+            gap: 16,
+          }}
+        >
+          <SetupStepsBlock spec={spec} />
+          <ConfigFieldsBlock spec={spec} onChanged={onChanged} />
+          <ActionBlock
+            spec={spec}
+            integrations={integrations}
+            onChanged={onChanged}
+          />
+          {spec.features.length > 1 && (
+            <FeatureTogglesBlock
+              spec={spec}
+              integrations={integrations}
+              onChanged={onChanged}
             />
-          ))
-        )}
-      </div>
-
-      {editing && (
-        <EditIntegrationInline
-          integration={editing}
-          onDone={() => {
-            setEditing(null);
-            refetch();
-          }}
-          onCancel={() => setEditing(null)}
-        />
-      )}
-
-      {adding && (
-        <AddIntegrationInline
-          options={missing}
-          onDone={() => {
-            setAdding(false);
-            refetch();
-          }}
-          onCancel={() => setAdding(false)}
-        />
+          )}
+        </div>
       )}
     </div>
   );
 }
 
-function GoogleCalendarBlock({
-  integration,
-  configured,
+function SetupStepsBlock({ spec }: { spec: IntegrationSpec }) {
+  return (
+    <div>
+      <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 8 }}>
+        1. Set up on {spec.label}'s side
+      </div>
+      <ol style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 10 }}>
+        {spec.steps.map((step, i) => (
+          <li key={i} style={{ fontSize: 11.5, lineHeight: 1.55 }}>
+            <div style={{ fontWeight: 500 }}>{step.title}</div>
+            <div className="muted" style={{ whiteSpace: "pre-line" }}>
+              {step.body}
+            </div>
+            {step.link && (
+              <a
+                href={step.link.href}
+                target="_blank"
+                rel="noreferrer noopener"
+                style={{
+                  fontSize: 11,
+                  color: "var(--accent, #4f7cff)",
+                  textDecoration: "underline",
+                  textUnderlineOffset: 2,
+                  marginTop: 2,
+                  display: "inline-block",
+                }}
+              >
+                {step.link.label} ↗
+              </a>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function ConfigFieldsBlock({
+  spec,
   onChanged,
 }: {
-  integration: Integration | null;
-  configured: boolean;
+  spec: IntegrationSpec;
   onChanged: () => void;
 }) {
+  const qc = useQueryClient();
+  const { data, refetch: refetchCfg } = useQuery({
+    queryKey: ["integration-config", spec.configProvider],
+    queryFn: () => api.integrations.getConfig(spec.configProvider),
+  });
+  const saved = data?.fields ?? {};
+
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const fields: Record<string, string | null> = {};
+      for (const f of spec.fields) {
+        // Empty string = clear. Undefined = don't touch.
+        if (drafts[f.key] !== undefined) fields[f.key] = drafts[f.key];
+      }
+      if (Object.keys(fields).length === 0) return;
+      await api.integrations.putConfig(spec.configProvider, fields);
+    },
+    onSuccess: () => {
+      setError(null);
+      setDrafts({});
+      setSavedAt(Date.now());
+      refetchCfg();
+      qc.invalidateQueries({ queryKey: ["integrations-google-status"] });
+      onChanged();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const clear = useMutation({
+    mutationFn: () => api.integrations.clearConfig(spec.configProvider),
+    onSuccess: () => {
+      setError(null);
+      setDrafts({});
+      refetchCfg();
+      qc.invalidateQueries({ queryKey: ["integrations-google-status"] });
+      onChanged();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const hasDrafts = Object.values(drafts).some((v) => v !== undefined);
+  const hasAnySaved = Object.keys(saved).length > 0;
+
+  return (
+    <div>
+      <div
+        className="caps muted"
+        style={{ fontSize: 10.5, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}
+      >
+        <span>2. Paste your credentials</span>
+        {savedAt && Date.now() - savedAt < 3000 && (
+          <span style={{ color: "var(--green)", textTransform: "none" }}>
+            ✓ saved
+          </span>
+        )}
+      </div>
+      <div style={{ display: "grid", gap: 8 }}>
+        {spec.fields.map((f) => (
+          <ConfigFieldRow
+            key={f.key}
+            field={f}
+            present={saved[f.key]?.present === true}
+            masked={saved[f.key]?.masked ?? ""}
+            value={drafts[f.key]}
+            revealed={!!revealed[f.key]}
+            onChange={(val) => setDrafts((d) => ({ ...d, [f.key]: val }))}
+            onReveal={() => setRevealed((r) => ({ ...r, [f.key]: !r[f.key] }))}
+          />
+        ))}
+      </div>
+      {error && (
+        <div style={{ color: "var(--red, #ef4444)", fontSize: 11.5, marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+      <div className="row gap-2" style={{ justifyContent: "flex-end", marginTop: 10 }}>
+        {hasAnySaved && (
+          <button
+            type="button"
+            className="btn ghost"
+            style={{ color: "var(--red, #ef4444)" }}
+            onClick={() => {
+              if (confirm(`Clear all ${spec.label} credentials?`)) clear.mutate();
+            }}
+            disabled={clear.isPending}
+          >
+            Clear credentials
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn primary"
+          onClick={() => save.mutate()}
+          disabled={!hasDrafts || save.isPending}
+        >
+          {save.isPending ? "Saving…" : "Save credentials"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ConfigFieldRow({
+  field,
+  present,
+  masked,
+  value,
+  revealed,
+  onChange,
+  onReveal,
+}: {
+  field: ConfigField;
+  present: boolean;
+  masked: string;
+  value: string | undefined;
+  revealed: boolean;
+  onChange: (v: string) => void;
+  onReveal: () => void;
+}) {
+  const isSecret = field.type === "secret";
+  const placeholder = present ? masked : field.placeholder ?? "";
+  const displayValue = value !== undefined ? value : "";
+  const common: React.CSSProperties = { ...inputStyle, width: "100%" };
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 10, alignItems: "start" }}>
+      <div>
+        <div style={{ fontSize: 11.5 }}>
+          {field.label}
+          {field.required && <span style={{ color: "var(--red, #ef4444)" }}> *</span>}
+        </div>
+        {field.help && (
+          <div className="muted" style={{ fontSize: 10.5, marginTop: 2 }}>
+            {field.help}
+          </div>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        {field.type === "textarea" ? (
+          <textarea
+            value={displayValue}
+            placeholder={placeholder}
+            onChange={(e) => onChange(e.target.value)}
+            rows={3}
+            style={{ ...common, fontFamily: "'JetBrains Mono', monospace", resize: "vertical" }}
+          />
+        ) : (
+          <input
+            type={isSecret && !revealed && value === undefined ? "password" : "text"}
+            value={displayValue}
+            placeholder={placeholder}
+            onChange={(e) => onChange(e.target.value)}
+            style={{
+              ...common,
+              fontFamily: isSecret ? "'JetBrains Mono', monospace" : undefined,
+            }}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        )}
+        {isSecret && (
+          <button
+            type="button"
+            className="btn ghost"
+            style={{ fontSize: 11 }}
+            onClick={onReveal}
+            title={revealed ? "Hide" : "Show"}
+          >
+            <Icon name={revealed ? "x" : "check"} size={11} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ActionBlock({
+  spec,
+  integrations,
+  onChanged,
+}: {
+  spec: IntegrationSpec;
+  integrations: Integration[];
+  onChanged: () => void;
+}) {
+  const { data: googleStatus } = useQuery({
+    queryKey: ["integrations-google-status"],
+    queryFn: () => api.integrations.googleStatus(),
+    enabled: spec.oauth,
+  });
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
 
-  const connected = integration?.status === "connected";
+  if (!spec.oauth) {
+    // Non-OAuth providers: the "Save credentials" button in ConfigFieldsBlock
+    // is the action. Nothing to show here.
+    return null;
+  }
+
+  const master = integrations.find((i) => i.provider === spec.configProvider);
+  const connected = master?.status === "connected";
+  const configured = googleStatus?.configured ?? false;
 
   const connect = async () => {
     setError(null);
@@ -671,76 +950,62 @@ function GoogleCalendarBlock({
   });
 
   const disconnect = useMutation({
-    mutationFn: () => {
-      if (!integration) throw new Error("not_connected");
-      return api.integrations.disconnect(integration.id);
+    mutationFn: () => api.integrations.disconnectGoogle(),
+    onSuccess: () => {
+      setError(null);
+      onChanged();
     },
-    onSuccess: onChanged,
     onError: (err) => setError(err instanceof Error ? err.message : String(err)),
   });
 
   return (
-    <div style={{ border: "1px solid var(--hair)", background: "var(--bg)", padding: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12.5, fontWeight: 500 }}>Google Calendar</div>
-          <div className="muted" style={{ fontSize: 11 }}>
-            {connected
-              ? `Connected as ${integration?.detail ?? "unknown"}`
-              : "Real OAuth. Events sync into your calendar every 15 min."}
-          </div>
-        </div>
-        <span
-          className="chip"
-          style={{
-            color: connected ? "var(--green)" : "var(--muted)",
-            borderColor: connected
-              ? "color-mix(in oklch, var(--green), transparent 70%)"
-              : "var(--hair-2)",
-          }}
-        >
-          {integration?.status ?? "not connected"}
-        </span>
+    <div>
+      <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 8 }}>
+        3. Connect
       </div>
-
       {!configured ? (
         <div
           style={{
             fontSize: 11.5,
-            color: "var(--muted)",
+            color: "var(--text)",
             background: "color-mix(in oklch, var(--yellow, #eab308), transparent 88%)",
             border: "1px solid color-mix(in oklch, var(--yellow, #eab308), transparent 70%)",
             padding: "8px 10px",
             borderRadius: 4,
           }}
         >
-          Google OAuth is not configured. Set <code>GOOGLE_CLIENT_ID</code> and{" "}
-          <code>GOOGLE_CLIENT_SECRET</code> in your <code>.env</code>. See{" "}
-          <code>docs/INTEGRATIONS.md</code> for a step-by-step walkthrough.
+          Save your OAuth client ID and secret above first, then come back here
+          to connect.
         </div>
       ) : connected ? (
-        <div className="row gap-2" style={{ alignItems: "center" }}>
-          <div className="muted mono" style={{ fontSize: 10.5, flex: 1 }}>
-            {integration?.lastSyncedAt
-              ? `last synced ${new Date(integration.lastSyncedAt).toLocaleString()}`
-              : "not synced yet"}
+        <div>
+          <div className="muted mono" style={{ fontSize: 10.5, marginBottom: 8 }}>
+            Connected as {master?.detail ?? "unknown"} ·{" "}
+            {master?.lastSyncedAt
+              ? `last synced ${new Date(master.lastSyncedAt).toLocaleString()}`
+              : "never synced"}
           </div>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => sync.mutate()}
-            disabled={sync.isPending}
-          >
-            {sync.isPending ? "Syncing…" : "Sync now"}
-          </button>
-          <button
-            type="button"
-            className="btn ghost"
-            onClick={() => disconnect.mutate()}
-            disabled={disconnect.isPending}
-          >
-            Disconnect
-          </button>
+          <div className="row gap-2">
+            <button
+              type="button"
+              className="btn"
+              onClick={() => sync.mutate()}
+              disabled={sync.isPending}
+            >
+              {sync.isPending ? "Syncing…" : "Sync calendar now"}
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => {
+                if (confirm("Disconnect Google? This revokes tokens and turns off all three features."))
+                  disconnect.mutate();
+              }}
+              disabled={disconnect.isPending}
+            >
+              Disconnect Google
+            </button>
+          </div>
         </div>
       ) : (
         <button
@@ -749,10 +1014,9 @@ function GoogleCalendarBlock({
           onClick={connect}
           disabled={connecting}
         >
-          {connecting ? "Connecting…" : "Connect Google Calendar"}
+          {connecting ? "Opening Google…" : `Connect ${spec.label}`}
         </button>
       )}
-
       {error && (
         <div style={{ color: "var(--red, #ef4444)", fontSize: 11.5, marginTop: 8 }}>
           {error}
@@ -762,245 +1026,127 @@ function GoogleCalendarBlock({
   );
 }
 
-function IntegrationRow({
-  integration,
-  onEdit,
+function FeatureTogglesBlock({
+  spec,
+  integrations,
   onChanged,
 }: {
-  integration: Integration;
-  onEdit: () => void;
+  spec: IntegrationSpec;
+  integrations: Integration[];
   onChanged: () => void;
 }) {
+  const master = integrations.find((i) => i.provider === spec.configProvider);
+  const masterConnected = master?.status === "connected";
+
+  return (
+    <div>
+      <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 8 }}>
+        4. Products (toggle each on/off)
+      </div>
+      <div
+        style={{
+          border: "1px solid var(--hair-2)",
+          borderRadius: 4,
+        }}
+      >
+        {spec.features.map((feat, idx) => {
+          const row = integrations.find((i) => i.provider === feat.id);
+          return (
+            <FeatureToggleRow
+              key={feat.id}
+              feature={feat}
+              row={row ?? null}
+              disabled={!masterConnected}
+              isLast={idx === spec.features.length - 1}
+              onChanged={onChanged}
+            />
+          );
+        })}
+      </div>
+      {!masterConnected && (
+        <div className="muted" style={{ fontSize: 10.5, marginTop: 6 }}>
+          Connect {spec.label} first to enable these toggles.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FeatureToggleRow({
+  feature,
+  row,
+  disabled,
+  isLast,
+  onChanged,
+}: {
+  feature: IntegrationSpec["features"][number];
+  row: Integration | null;
+  disabled: boolean;
+  isLast: boolean;
+  onChanged: () => void;
+}) {
+  const enabled = row?.status === "connected";
   const toggle = useMutation({
-    mutationFn: () =>
-      api.integrations.patch(integration.id, {
-        status: integration.status === "connected" ? "disconnected" : "connected",
-      }),
-    onSuccess: onChanged,
-  });
-  const remove = useMutation({
-    mutationFn: () => api.integrations.remove(integration.id),
+    mutationFn: () => {
+      if (!row) throw new Error("feature row missing — reconnect required");
+      return api.integrations.patch(row.id, {
+        status: enabled ? "disconnected" : "connected",
+      });
+    },
     onSuccess: onChanged,
   });
 
-  const connected = integration.status === "connected";
+  const implChipColor =
+    feature.implementation === "live"
+      ? "var(--green)"
+      : feature.implementation === "saved-only"
+        ? "var(--yellow, #eab308)"
+        : "var(--muted)";
+  const implChipBorder =
+    feature.implementation === "live"
+      ? "color-mix(in oklch, var(--green), transparent 70%)"
+      : feature.implementation === "saved-only"
+        ? "color-mix(in oklch, var(--yellow, #eab308), transparent 70%)"
+        : "var(--hair-2)";
+
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "1fr auto auto auto",
+        gridTemplateColumns: "1fr auto auto",
         gap: 10,
-        padding: "8px 12px",
-        borderBottom: "1px solid var(--hair)",
         alignItems: "center",
+        padding: "8px 10px",
+        borderBottom: isLast ? undefined : "1px solid var(--hair-2)",
       }}
     >
       <div>
-        <div style={{ fontSize: 12.5 }}>{integrationLabel(integration.provider)}</div>
-        <div className="muted mono" style={{ fontSize: 10.5 }}>
-          {integration.detail || "no detail"}
-          {integration.lastSyncedAt
-            ? ` · synced ${new Date(integration.lastSyncedAt).toLocaleDateString()}`
-            : ""}
+        <div style={{ fontSize: 12 }}>{feature.label}</div>
+        <div className="muted" style={{ fontSize: 10.5 }}>
+          {feature.description}
+          {feature.implementationNote ? ` · ${feature.implementationNote}` : ""}
         </div>
       </div>
       <span
         className="chip"
-        style={{
-          color: connected ? "var(--green)" : "var(--muted)",
-          borderColor: connected
-            ? "color-mix(in oklch, var(--green), transparent 70%)"
-            : "var(--hair-2)",
-        }}
+        style={{ color: implChipColor, borderColor: implChipBorder }}
       >
-        {integration.status}
+        {feature.implementation === "live"
+          ? "live"
+          : feature.implementation === "saved-only"
+            ? "saved-only"
+            : "planned"}
       </span>
       <button
         type="button"
         className="btn ghost"
         style={{ fontSize: 11 }}
         onClick={() => toggle.mutate()}
-        disabled={toggle.isPending}
+        disabled={disabled || toggle.isPending || !row}
+        title={disabled ? "Connect first" : enabled ? "Disable this feature" : "Enable this feature"}
       >
-        {connected ? "Disconnect" : "Reconnect"}
+        {enabled ? "On" : "Off"}
       </button>
-      <button
-        type="button"
-        className="btn ghost"
-        style={{ fontSize: 11 }}
-        onClick={onEdit}
-      >
-        Edit
-      </button>
-      <button
-        type="button"
-        className="btn ghost"
-        style={{ fontSize: 11, color: "var(--red, #ef4444)", gridColumn: "4 / 5" }}
-        onClick={() => remove.mutate()}
-        disabled={remove.isPending}
-        title="Remove"
-      >
-        <Icon name="x" size={11} />
-      </button>
-    </div>
-  );
-}
-
-function AddIntegrationInline({
-  options,
-  onDone,
-  onCancel,
-}: {
-  options: { id: string; label: string }[];
-  onDone: () => void;
-  onCancel: () => void;
-}) {
-  const [provider, setProvider] = useState(options[0]?.id ?? "");
-  const [detail, setDetail] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const add = useMutation({
-    mutationFn: () =>
-      api.integrations.create({
-        provider,
-        status: "connected",
-        detail: detail || null,
-      }),
-    onSuccess: onDone,
-    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
-  });
-
-  return (
-    <div
-      style={{
-        border: "1px solid var(--hair)",
-        background: "var(--bg)",
-        padding: 12,
-        display: "grid",
-        gap: 10,
-      }}
-    >
-      <div style={{ fontSize: 12.5, fontWeight: 500 }}>New integration</div>
-      <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 10 }}>
-        <span className="caps">Provider</span>
-        <select
-          value={provider}
-          onChange={(e) => setProvider(e.target.value)}
-          style={selectStyle}
-        >
-          {options.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.label}
-            </option>
-          ))}
-        </select>
-        <span className="caps">Detail</span>
-        <input
-          value={detail}
-          placeholder="primary calendar · @rafe"
-          onChange={(e) => setDetail(e.target.value)}
-          style={inputStyle}
-        />
-      </div>
-      {error && (
-        <div style={{ color: "var(--red, #ef4444)", fontSize: 11.5 }}>{error}</div>
-      )}
-      <div className="row gap-2" style={{ justifyContent: "flex-end" }}>
-        <button type="button" className="btn ghost" onClick={onCancel}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="btn primary"
-          onClick={() => {
-            setError(null);
-            add.mutate();
-          }}
-          disabled={add.isPending || !provider}
-        >
-          {add.isPending ? "Adding…" : "Add"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function EditIntegrationInline({
-  integration,
-  onDone,
-  onCancel,
-}: {
-  integration: Integration;
-  onDone: () => void;
-  onCancel: () => void;
-}) {
-  const [status, setStatus] = useState<Integration["status"]>(integration.status);
-  const [detail, setDetail] = useState(integration.detail ?? "");
-  const [error, setError] = useState<string | null>(null);
-
-  const save = useMutation({
-    mutationFn: () =>
-      api.integrations.patch(integration.id, {
-        status: status as "connected" | "available" | "disconnected",
-        detail,
-      }),
-    onSuccess: onDone,
-    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
-  });
-
-  return (
-    <div
-      style={{
-        border: "1px solid var(--hair)",
-        background: "var(--bg)",
-        padding: 12,
-        display: "grid",
-        gap: 10,
-      }}
-    >
-      <div style={{ fontSize: 12.5, fontWeight: 500 }}>
-        Edit {integrationLabel(integration.provider)}
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 10 }}>
-        <span className="caps">Status</span>
-        <div className="seg-mini">
-          {(["connected", "available", "disconnected"] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              data-active={status === s}
-              onClick={() => setStatus(s)}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-        <span className="caps">Detail</span>
-        <input
-          value={detail}
-          onChange={(e) => setDetail(e.target.value)}
-          placeholder="2 calendars · last sync 3m ago"
-          style={inputStyle}
-        />
-      </div>
-      {error && (
-        <div style={{ color: "var(--red, #ef4444)", fontSize: 11.5 }}>{error}</div>
-      )}
-      <div className="row gap-2" style={{ justifyContent: "flex-end" }}>
-        <button type="button" className="btn ghost" onClick={onCancel}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="btn primary"
-          onClick={() => {
-            setError(null);
-            save.mutate();
-          }}
-          disabled={save.isPending}
-        >
-          {save.isPending ? "Saving…" : "Save"}
-        </button>
-      </div>
     </div>
   );
 }

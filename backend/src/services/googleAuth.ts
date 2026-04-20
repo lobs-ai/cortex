@@ -1,38 +1,59 @@
 import { google } from "googleapis";
 import type { OAuth2Client, Credentials } from "google-auth-library";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import { db, schema } from "../db/client.js";
 import { env } from "../env.js";
 import { newId } from "../lib/ids.js";
 import { decrypt, encrypt } from "../lib/crypto.js";
+import { getConfig } from "./integrationConfigs.js";
 
-export const GOOGLE_CALENDAR_PROVIDER = "google_calendar";
+// Row model:
+//   provider = "google"          → master. Holds OAuth tokens + connected email.
+//   provider = "google_calendar" → per-feature enable flag (status=connected|disconnected).
+//   provider = "gmail"           → same.
+//   provider = "google_drive"    → same.
+//
+// On Connect Google, all three feature rows are enabled. Users can later
+// toggle any feature off — sync services for that feature are expected to
+// check the flag before running. Disconnecting the master revokes tokens
+// and turns all features off.
+
+export const GOOGLE_MASTER_PROVIDER = "google";
+export const GOOGLE_FEATURE_PROVIDERS = ["google_calendar", "gmail", "google_drive"] as const;
+export type GoogleFeatureProvider = (typeof GOOGLE_FEATURE_PROVIDERS)[number];
 
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/drive.metadata.readonly",
   "https://www.googleapis.com/auth/userinfo.email",
   "openid",
 ];
 
-export function googleOAuthConfigured(): boolean {
-  return !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+async function resolveClientCreds(
+  userId: string,
+): Promise<{ clientId: string; clientSecret: string; redirectUri: string } | null> {
+  const cfg = await getConfig(userId, "google");
+  const clientId = cfg.client_id?.trim() || env.GOOGLE_CLIENT_ID;
+  const clientSecret = cfg.client_secret?.trim() || env.GOOGLE_CLIENT_SECRET;
+  const redirectUri =
+    cfg.redirect_uri?.trim() || env.GOOGLE_REDIRECT_URI;
+  if (!clientId || !clientSecret) return null;
+  return { clientId, clientSecret, redirectUri };
 }
 
-export function makeOAuth2Client(): OAuth2Client {
-  if (!googleOAuthConfigured()) {
-    throw new Error("google_oauth_not_configured");
-  }
-  return new google.auth.OAuth2(
-    env.GOOGLE_CLIENT_ID,
-    env.GOOGLE_CLIENT_SECRET,
-    env.GOOGLE_REDIRECT_URI,
-  );
+export async function googleOAuthConfigured(userId: string): Promise<boolean> {
+  return (await resolveClientCreds(userId)) !== null;
 }
 
-// Tiny in-memory CSRF store for the OAuth state round-trip. Entries expire
-// after 10 minutes. Fine for single-process dev; migrate to Redis with real
-// auth.
+async function makeOAuth2Client(userId: string): Promise<OAuth2Client> {
+  const creds = await resolveClientCreds(userId);
+  if (!creds) throw new Error("google_oauth_not_configured");
+  return new google.auth.OAuth2(creds.clientId, creds.clientSecret, creds.redirectUri);
+}
+
+// ── Short-lived CSRF state store ──────────────────────────────────────────
 type StateEntry = { userId: string; expires: number };
 const STATE_TTL_MS = 10 * 60 * 1000;
 const stateStore = new Map<string, StateEntry>();
@@ -58,8 +79,10 @@ export function consumeState(token: string): { userId: string } | null {
   return { userId: entry.userId };
 }
 
-export function getAuthUrl(state: string): string {
-  const client = makeOAuth2Client();
+// ── Flow ──────────────────────────────────────────────────────────────────
+
+export async function getAuthUrl(userId: string, state: string): Promise<string> {
+  const client = await makeOAuth2Client(userId);
   return client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
@@ -69,11 +92,11 @@ export function getAuthUrl(state: string): string {
   });
 }
 
-export async function exchangeCode(code: string): Promise<{
-  tokens: Credentials;
-  email: string;
-}> {
-  const client = makeOAuth2Client();
+export async function exchangeCode(
+  userId: string,
+  code: string,
+): Promise<{ tokens: Credentials; email: string }> {
+  const client = await makeOAuth2Client(userId);
   const { tokens } = await client.getToken(code);
   client.setCredentials(tokens);
   const oauth2 = google.oauth2({ version: "v2", auth: client });
@@ -82,123 +105,144 @@ export async function exchangeCode(code: string): Promise<{
   return { tokens, email };
 }
 
-export async function upsertGoogleIntegration(
+function serializeCreds(c: Credentials): string {
+  return JSON.stringify({
+    access_token: c.access_token ?? null,
+    refresh_token: c.refresh_token ?? null,
+    expiry_date: c.expiry_date ?? null,
+    token_type: c.token_type ?? null,
+    scope: c.scope ?? null,
+  });
+}
+
+export async function upsertGoogleConnection(
   userId: string,
   tokens: Credentials,
   email: string,
-): Promise<{ id: string }> {
+): Promise<void> {
   const now = new Date();
-  const payload = JSON.stringify({
-    access_token: tokens.access_token ?? null,
-    refresh_token: tokens.refresh_token ?? null,
-    expiry_date: tokens.expiry_date ?? null,
-    token_type: tokens.token_type ?? null,
-    scope: tokens.scope ?? null,
-  });
 
-  const [existing] = await db
+  // Preserve prior refresh token if Google omitted one (silent re-consent).
+  const [existingMaster] = await db
     .select()
     .from(schema.integrations)
     .where(
       and(
         eq(schema.integrations.userId, userId),
-        eq(schema.integrations.provider, GOOGLE_CALENDAR_PROVIDER),
+        eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
       ),
     );
-
-  // Google only returns a refresh_token on first consent. If the user
-  // reconnects without prompt=consent we may not get one — preserve the
-  // existing refresh token in that case.
-  let finalPayload = payload;
-  if (existing?.refreshTokenEncrypted && !tokens.refresh_token) {
-    const prev = JSON.parse(decrypt(existing.refreshTokenEncrypted)) as Credentials;
-    finalPayload = JSON.stringify({
-      access_token: tokens.access_token ?? null,
-      refresh_token: prev.refresh_token ?? null,
-      expiry_date: tokens.expiry_date ?? null,
-      token_type: tokens.token_type ?? null,
-      scope: tokens.scope ?? null,
-    });
+  let finalTokens: Credentials = { ...tokens };
+  if (existingMaster?.accessTokenEncrypted && !tokens.refresh_token) {
+    try {
+      const prev = JSON.parse(decrypt(existingMaster.accessTokenEncrypted)) as Credentials;
+      if (prev.refresh_token) finalTokens.refresh_token = prev.refresh_token;
+    } catch {
+      // bad ciphertext, ignore
+    }
   }
 
-  const encryptedPayload = encrypt(finalPayload);
+  const encrypted = encrypt(serializeCreds(finalTokens));
 
-  if (existing) {
+  if (existingMaster) {
     await db
       .update(schema.integrations)
       .set({
         status: "connected",
         detail: email,
-        accessTokenEncrypted: encryptedPayload,
-        refreshTokenEncrypted: encryptedPayload,
+        accessTokenEncrypted: encrypted,
+        refreshTokenEncrypted: encrypted,
         lastSyncedAt: now,
       })
-      .where(eq(schema.integrations.id, existing.id));
-    return { id: existing.id };
+      .where(eq(schema.integrations.id, existingMaster.id));
+  } else {
+    await db.insert(schema.integrations).values({
+      id: newId("in"),
+      userId,
+      provider: GOOGLE_MASTER_PROVIDER,
+      status: "connected",
+      detail: email,
+      accessTokenEncrypted: encrypted,
+      refreshTokenEncrypted: encrypted,
+      lastSyncedAt: now,
+    });
   }
 
-  const id = newId("in");
-  await db.insert(schema.integrations).values({
-    id,
-    userId,
-    provider: GOOGLE_CALENDAR_PROVIDER,
-    status: "connected",
-    detail: email,
-    accessTokenEncrypted: encryptedPayload,
-    refreshTokenEncrypted: encryptedPayload,
-    lastSyncedAt: now,
-  });
-  return { id };
+  // Ensure feature rows exist and are enabled. Preserve a row's existing
+  // status if the user previously disabled it (so a reconnect doesn't
+  // silently re-enable a feature they turned off).
+  for (const provider of GOOGLE_FEATURE_PROVIDERS) {
+    const [existing] = await db
+      .select()
+      .from(schema.integrations)
+      .where(
+        and(
+          eq(schema.integrations.userId, userId),
+          eq(schema.integrations.provider, provider),
+        ),
+      );
+    if (existing) {
+      // Only flip to "connected" if it wasn't explicitly disconnected.
+      if (existing.status !== "disconnected") {
+        await db
+          .update(schema.integrations)
+          .set({ status: "connected", detail: email })
+          .where(eq(schema.integrations.id, existing.id));
+      } else {
+        // Leave as disconnected but update detail.
+        await db
+          .update(schema.integrations)
+          .set({ detail: email })
+          .where(eq(schema.integrations.id, existing.id));
+      }
+    } else {
+      await db.insert(schema.integrations).values({
+        id: newId("in"),
+        userId,
+        provider,
+        status: "connected",
+        detail: email,
+      });
+    }
+  }
 }
 
 async function persistRefreshedCreds(
   userId: string,
-  integrationId: string,
+  masterId: string,
   merged: Credentials,
 ): Promise<void> {
-  const payload = JSON.stringify({
-    access_token: merged.access_token ?? null,
-    refresh_token: merged.refresh_token ?? null,
-    expiry_date: merged.expiry_date ?? null,
-    token_type: merged.token_type ?? null,
-    scope: merged.scope ?? null,
-  });
+  const payload = encrypt(serializeCreds(merged));
   await db
     .update(schema.integrations)
-    .set({
-      accessTokenEncrypted: encrypt(payload),
-      refreshTokenEncrypted: encrypt(payload),
-    })
+    .set({ accessTokenEncrypted: payload, refreshTokenEncrypted: payload })
     .where(
       and(
         eq(schema.integrations.userId, userId),
-        eq(schema.integrations.id, integrationId),
+        eq(schema.integrations.id, masterId),
       ),
     );
 }
 
 export async function getAuthedClient(
   userId: string,
-): Promise<{ client: OAuth2Client; integrationId: string } | null> {
+): Promise<{ client: OAuth2Client; masterId: string } | null> {
   const [row] = await db
     .select()
     .from(schema.integrations)
     .where(
       and(
         eq(schema.integrations.userId, userId),
-        eq(schema.integrations.provider, GOOGLE_CALENDAR_PROVIDER),
+        eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
         eq(schema.integrations.status, "connected"),
       ),
     );
   if (!row || !row.accessTokenEncrypted) return null;
 
-  const client = makeOAuth2Client();
+  const client = await makeOAuth2Client(userId);
   const creds = JSON.parse(decrypt(row.accessTokenEncrypted)) as Credentials;
   client.setCredentials(creds);
 
-  // Google's OAuth2Client emits "tokens" whenever it silently refreshes. Merge
-  // and persist so the refresh token isn't lost and we don't re-refresh next
-  // call.
   client.on("tokens", (next) => {
     const merged: Credentials = { ...creds, ...next };
     if (!next.refresh_token && creds.refresh_token) merged.refresh_token = creds.refresh_token;
@@ -207,37 +251,48 @@ export async function getAuthedClient(
     });
   });
 
-  return { client, integrationId: row.id };
+  return { client, masterId: row.id };
 }
 
-export async function disconnectGoogle(
+export async function isFeatureEnabled(
   userId: string,
-  integrationId: string,
-): Promise<void> {
+  feature: GoogleFeatureProvider,
+): Promise<boolean> {
   const [row] = await db
     .select()
     .from(schema.integrations)
     .where(
       and(
         eq(schema.integrations.userId, userId),
-        eq(schema.integrations.id, integrationId),
+        eq(schema.integrations.provider, feature),
+        eq(schema.integrations.status, "connected"),
       ),
     );
-  if (!row) return;
+  return !!row;
+}
 
-  if (row.provider === GOOGLE_CALENDAR_PROVIDER && row.accessTokenEncrypted) {
+export async function disconnectGoogle(userId: string): Promise<void> {
+  const [master] = await db
+    .select()
+    .from(schema.integrations)
+    .where(
+      and(
+        eq(schema.integrations.userId, userId),
+        eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
+      ),
+    );
+  if (master?.accessTokenEncrypted) {
     try {
-      const client = makeOAuth2Client();
-      const creds = JSON.parse(decrypt(row.accessTokenEncrypted)) as Credentials;
+      const client = await makeOAuth2Client(userId);
+      const creds = JSON.parse(decrypt(master.accessTokenEncrypted)) as Credentials;
       client.setCredentials(creds);
       await client.revokeCredentials();
     } catch (err) {
-      // Revoke best-effort: token may already be invalid. Don't block the
-      // local clear.
       console.warn("google revoke failed", err);
     }
   }
 
+  // Clear master tokens, turn everything off.
   await db
     .update(schema.integrations)
     .set({
@@ -245,5 +300,13 @@ export async function disconnectGoogle(
       accessTokenEncrypted: null,
       refreshTokenEncrypted: null,
     })
-    .where(eq(schema.integrations.id, integrationId));
+    .where(
+      and(
+        eq(schema.integrations.userId, userId),
+        inArray(schema.integrations.provider, [
+          GOOGLE_MASTER_PROVIDER,
+          ...GOOGLE_FEATURE_PROVIDERS,
+        ]),
+      ),
+    );
 }
