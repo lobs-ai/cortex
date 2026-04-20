@@ -4,6 +4,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { Icon, type IconName } from "./Icon";
 import { RightRail } from "./RightRail";
+import { SettingsModal } from "./SettingsModal";
 
 const TABS: { id: string; label: string; icon: IconName; k: string; path: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "dashboard", k: "1", path: "/" },
@@ -38,6 +39,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [accent, setAccent] = useState("blue");
   const [showProactive, setShowProactive] = useState(true);
   const [tweaksOpen, setTweaksOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [now, setNow] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -99,6 +101,13 @@ export function Shell({ children }: { children: ReactNode }) {
           <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
         </button>
         <button className="rail-tab" title="Tweaks" onClick={() => setTweaksOpen((v) => !v)}>
+          <Icon name="bolt" size={16} />
+        </button>
+        <button
+          className="rail-tab"
+          title="Settings — AI provider & model"
+          onClick={() => setSettingsOpen(true)}
+        >
           <Icon name="settings" size={16} />
         </button>
       </div>
@@ -187,6 +196,8 @@ export function Shell({ children }: { children: ReactNode }) {
           </div>
         </div>
       )}
+
+      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

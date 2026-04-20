@@ -103,4 +103,75 @@ const CHAT_SEED = [
   ] },
 ];
 
-Object.assign(window, { PROJECTS, EVENTS, TASKS, ALERTS, TENDENCIES, PREFERENCES, INTEGRATIONS, CHAT_SEED, today });
+// Recurring tasks + habits — managed by Cortex
+const RECURRING = [
+  {
+    id: "r1", title: "Morning standup (self-log)", project: "p1",
+    cadence: "daily", time: "09:00", estMin: 5, priority: "P2",
+    streak: 14, completedToday: true, weeklyRate: 0.93,
+    managedByAI: true, suggestedBy: "tendency td1",
+    note: "Keeps your advisor 1:1s on track — you ship more when you've logged the day.",
+  },
+  {
+    id: "r2", title: "Deep work block — thesis",    project: "p1",
+    cadence: "daily (M–F)", time: "11:00", estMin: 90, priority: "P0",
+    streak: 9, completedToday: false, weeklyRate: 0.82,
+    managedByAI: true, suggestedBy: "learned tendency td1 + td4",
+    note: "Auto-scheduled at 11:00 — your strongest focus window (88% confidence).",
+  },
+  {
+    id: "r3", title: "Gym",                          project: null,
+    cadence: "Mon/Wed/Fri", time: "07:30", estMin: 60, priority: "P2",
+    streak: 5, completedToday: false, weeklyRate: 0.67,
+    managedByAI: false,
+    note: "You set this one.",
+  },
+  {
+    id: "r4", title: "Read 1 paper",                 project: "p5",
+    cadence: "daily", time: "21:00", estMin: 30, priority: "P2",
+    streak: 22, completedToday: false, weeklyRate: 0.86,
+    managedByAI: true, suggestedBy: "reading-group cadence",
+    note: "Queued from arxiv-sanity based on reading group topic.",
+  },
+  {
+    id: "r5", title: "Weekly review",                project: null,
+    cadence: "weekly · Sun 18:00", time: "18:00", estMin: 45, priority: "P1",
+    streak: 6, completedToday: false, weeklyRate: 1.0,
+    managedByAI: true, suggestedBy: "explicit pref pr5",
+    note: "Generates your week-ahead plan and a Discord summary.",
+  },
+  {
+    id: "r6", title: "Grade 2 project submissions",  project: "p4",
+    cadence: "weekdays · 17:00", time: "17:00", estMin: 40, priority: "P2",
+    streak: 3, completedToday: false, weeklyRate: 0.58, paused: true,
+    managedByAI: true, suggestedBy: "grading backlog rule",
+    note: "Paused until NeurIPS rebuttal ships — Cortex will resume Apr 23.",
+  },
+];
+
+// Cortex suggestions for new recurring tasks / habit changes
+const RECURRING_SUGGESTIONS = [
+  {
+    id: "rs1", action: "create",
+    title: "Make 'prep for advisor 1:1' a weekly recurring task?",
+    body: "You've manually created this task 5 Mondays in a row at ~09:15. I can add it as a weekly recurring 30m block and auto-pull your notes.",
+    cadence: "Weekly · Mon 09:15 · 30m",
+    confidence: 0.84, evidence: 5,
+  },
+  {
+    id: "rs2", action: "adjust",
+    title: "Move 'deep work — thesis' earlier by 15m?",
+    body: "You've been starting this block at 10:45 instead of 11:00 for the last 7 sessions. Shifting the recurring time will stop the drift.",
+    cadence: "Daily (M–F) · 10:45 · 90m",
+    confidence: 0.76, evidence: 7,
+  },
+  {
+    id: "rs3", action: "pause",
+    title: "Pause 'Gym' for this week?",
+    body: "NeurIPS rebuttal deadline is tight and you've skipped the last 2 gym sessions anyway. I can auto-resume next Monday.",
+    cadence: "Mon/Wed/Fri · 07:30",
+    confidence: 0.68, evidence: 2,
+  },
+];
+
+Object.assign(window, { PROJECTS, EVENTS, TASKS, ALERTS, TENDENCIES, PREFERENCES, INTEGRATIONS, CHAT_SEED, RECURRING, RECURRING_SUGGESTIONS, today });

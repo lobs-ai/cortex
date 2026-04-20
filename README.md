@@ -8,13 +8,17 @@ See [docs/design/design-doc.md](docs/design/design-doc.md) for the full product 
 
 ```
 cortex/
-  frontend/     Next.js + TypeScript app
-  backend/      Fastify + TypeScript API (Drizzle + Postgres)
-  infra/        docker-compose, nginx, scripts
+  frontend/     Next.js + TypeScript app (pages + components)
+  backend/      Fastify + TypeScript server (Drizzle, Postgres, embeds Next.js)
+  infra/        docker-compose, scripts
   docs/
     design/     design doc
     example/    original HTML/JSX design prototype (reference only)
 ```
+
+The backend owns the HTTP server. Next.js is mounted inside Fastify via
+`next.getRequestHandler()`, so pages, static assets, API routes, and websockets
+all run on one port and one process.
 
 ## Quick start (docker)
 
@@ -23,34 +27,30 @@ cp .env.example .env
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-- Frontend: http://localhost (via nginx) or http://localhost:3030 direct
-- Backend:  http://localhost:9009
+Open http://localhost:9009.
 
 ## Quick start (local, no docker)
 
-Requires Node.js 20+ and a running Postgres (or use the SQLite dev fallback by leaving `DATABASE_URL` unset — the backend will store data in `backend/cortex.db`).
-
-Two terminals:
-
-```bash
-# terminal 1 — backend
-cd backend
-npm install
-npm run db:push         # apply schema
-npm run seed            # seed demo data
-npm run dev             # Fastify on :9009
-```
+Requires Node.js 20+. The backend stores data in `backend/cortex.db` (SQLite)
+unless `DATABASE_URL` is set.
 
 ```bash
-# terminal 2 — frontend
-cd frontend
-npm install
-npm run dev             # Next.js on :3030
+cd frontend && npm install && cd -
+cd backend  && npm install
+npm run db:push            # apply schema
+npm run dev                # Fastify + Next on :9009
 ```
 
-## Demo data
+Open http://localhost:9009.
 
-`npm run seed` (in `backend/`) loads the CSE-grad-student demo that matches the design prototype — NeurIPS rebuttal, advisor 1:1, EECS 598/484, etc. See `docs/example/` for the original design that this data is modeled on.
+## Seed / reset
+
+The backend starts with an empty database by default. If you want the
+CSE-grad-student demo that matches the design prototype, run:
+
+```bash
+cd backend && npm run seed:demo
+```
 
 ## Phases
 
@@ -60,4 +60,7 @@ Working priorities (per `AGENTS.md`):
 - **Phase 2 — AI surface**: LLM planning, chat, Discord notifications.
 - **Phase 3 — intelligence**: proactive assistant, memory system, advanced scheduling.
 
-The AI roles (Planner, Monitor, Memory curator, Chat) are wired as pluggable TypeScript modules that return structured outputs. Swap in an LLM by configuring `ANTHROPIC_API_KEY` — with no key, the stubs return deterministic demo responses so the UI always works.
+The AI roles (Planner, Monitor, Memory curator, Chat) are pluggable TypeScript
+modules that return structured outputs. Pick a provider + model in the in-app
+Settings; without credentials the stubs return deterministic demo responses so
+the UI always works.

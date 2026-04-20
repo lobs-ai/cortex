@@ -1,12 +1,23 @@
 "use client";
 
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, type Integration } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
+import { IntegrationManage } from "@/components/IntegrationManage";
+
+const PROVIDER_OPTIONS = [
+  { id: "google_calendar", label: "Google Calendar" },
+  { id: "discord", label: "Discord" },
+  { id: "github", label: "GitHub" },
+  { id: "slack", label: "Slack" },
+];
 
 export default function MemoryPage() {
   const qc = useQueryClient();
+  const [manage, setManage] = useState<Integration | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
   const { data: tendencies = [] } = useQuery({
     queryKey: ["tendencies"],
     queryFn: () => api.memory.tendencies(),
@@ -113,6 +124,13 @@ export default function MemoryPage() {
               <span className="title">
                 <b>Integrations</b>
               </span>
+              <button
+                className="btn ghost"
+                style={{ fontSize: 11 }}
+                onClick={() => setShowAdd(true)}
+              >
+                <Icon name="plus" size={12} /> Add
+              </button>
             </div>
             <div>
               {integrations.map((it) => (
@@ -146,9 +164,23 @@ export default function MemoryPage() {
                     <span className="sw" />
                     {it.status}
                   </span>
-                  <button className="btn ghost" style={{ fontSize: 11 }}>manage</button>
+                  <button
+                    className="btn ghost"
+                    style={{ fontSize: 11 }}
+                    onClick={() => setManage(it)}
+                  >
+                    manage
+                  </button>
                 </div>
               ))}
+              {integrations.length === 0 && (
+                <div
+                  className="muted"
+                  style={{ padding: 16, fontSize: 12, textAlign: "center" }}
+                >
+                  No integrations yet. Click <b>Add</b> to connect one.
+                </div>
+              )}
             </div>
           </div>
 
@@ -184,6 +216,97 @@ export default function MemoryPage() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {manage && <IntegrationManage integration={manage} onClose={() => setManage(null)} />}
+      {showAdd && (
+        <AddIntegrationModal onClose={() => setShowAdd(false)} />
+      )}
+    </div>
+  );
+}
+
+function AddIntegrationModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const [provider, setProvider] = useState("google_calendar");
+  const [detail, setDetail] = useState("");
+
+  const add = useMutation({
+    mutationFn: () =>
+      api.integrations.create({
+        provider,
+        status: "connected",
+        detail: detail || null,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["integrations"] });
+      onClose();
+    },
+  });
+
+  return (
+    <div
+      role="dialog"
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,.5)",
+        display: "grid",
+        placeItems: "center",
+        zIndex: 200,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="panel"
+        style={{ width: 420, background: "var(--panel)" }}
+      >
+        <div className="panel-hd">
+          <span className="title"><b>Add integration</b></span>
+          <button className="btn ghost" onClick={onClose}><Icon name="x" size={12} /></button>
+        </div>
+        <div className="panel-bd" style={{ display: "grid", gap: 10 }}>
+          <label className="col" style={{ gap: 4 }}>
+            <span className="caps">Provider</span>
+            <select
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              style={{
+                border: "1px solid var(--hair-2)",
+                padding: "6px 8px",
+                background: "var(--bg)",
+                color: "var(--text)",
+                fontSize: 12,
+              }}
+            >
+              {PROVIDER_OPTIONS.map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="col" style={{ gap: 4 }}>
+            <span className="caps">Detail</span>
+            <input
+              value={detail}
+              placeholder="e.g. primary calendar · @rafe"
+              onChange={(e) => setDetail(e.target.value)}
+              className="mono"
+              style={{
+                border: "1px solid var(--hair-2)",
+                padding: "6px 8px",
+                background: "var(--bg)",
+                fontSize: 12,
+              }}
+            />
+          </label>
+          <div className="row gap-2" style={{ justifyContent: "flex-end" }}>
+            <button className="btn ghost" onClick={onClose}>Cancel</button>
+            <button className="btn primary" onClick={() => add.mutate()} disabled={add.isPending}>
+              {add.isPending ? "Adding…" : "Add"}
+            </button>
           </div>
         </div>
       </div>

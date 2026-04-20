@@ -187,6 +187,42 @@ export const assistantMessages = sqliteTable("assistant_messages", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+export const recurringTasks = sqliteTable("recurring_tasks", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  title: text("title").notNull(),
+  projectId: text("project_id"),
+  cadence: text("cadence").notNull(), // "daily" | "weekdays" | "weekly" | "custom"
+  cadenceDetail: text("cadence_detail"), // human-readable extension ("Mon/Wed/Fri", RRULE string)
+  timeOfDay: text("time_of_day"), // "HH:MM"
+  estimatedMinutes: integer("estimated_minutes"),
+  priority: text("priority").notNull().default("P2"),
+  energyLevel: text("energy_level").notNull().default("med"),
+  streak: integer("streak").notNull().default(0),
+  weeklyRate: real("weekly_rate").notNull().default(0),
+  lastCompletedAt: integer("last_completed_at", { mode: "timestamp_ms" }),
+  paused: integer("paused", { mode: "boolean" }).notNull().default(false),
+  managedByAi: integer("managed_by_ai", { mode: "boolean" }).notNull().default(false),
+  suggestedBy: text("suggested_by"),
+  note: text("note"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+export const recurringSuggestions = sqliteTable("recurring_suggestions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  action: text("action").notNull(), // "create" | "adjust" | "pause"
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  cadence: text("cadence"),
+  confidence: real("confidence").notNull().default(0.5),
+  evidence: integer("evidence").notNull().default(0),
+  relatedRecurringId: text("related_recurring_id"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  dismissedAt: integer("dismissed_at", { mode: "timestamp_ms" }),
+});
+
 export const scheduledBlocks = sqliteTable("scheduled_blocks", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),

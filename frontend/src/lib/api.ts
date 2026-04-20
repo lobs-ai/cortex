@@ -1,4 +1,5 @@
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:9009";
+// Empty base → same-origin. Fastify + Next share one port now.
+const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -107,6 +108,37 @@ export type Preference = {
   confidence: number;
 };
 
+export type Recurring = {
+  id: string;
+  title: string;
+  project: string | null;
+  cadence: string;
+  cadenceDetail: string | null;
+  time: string | null;
+  estMin: number | null;
+  priority: "P0" | "P1" | "P2";
+  energy: "low" | "med" | "high";
+  streak: number;
+  weeklyRate: number;
+  completedToday: boolean;
+  lastCompletedAt: string | null;
+  paused: boolean;
+  managedByAi: boolean;
+  suggestedBy: string | null;
+  note: string | null;
+};
+
+export type RecurringSuggestion = {
+  id: string;
+  action: "create" | "adjust" | "pause" | string;
+  title: string;
+  body: string;
+  cadence: string | null;
+  confidence: number;
+  evidence: number;
+  relatedRecurringId: string | null;
+};
+
 export type Integration = {
   id: string;
   provider: string;
@@ -143,6 +175,27 @@ export const api = {
       if (to) qs.set("to", to.toISOString());
       return req<Event[]>(`/api/events?${qs.toString()}`);
     },
+    create: (body: {
+      title: string;
+      description?: string;
+      location?: string;
+      startTime: Date;
+      endTime: Date;
+      kind: Event["kind"];
+      projectId?: string | null;
+      important?: boolean;
+    }) =>
+      req<Event>("/api/events", {
+        method: "POST",
+        body: JSON.stringify({
+          ...body,
+          startTime: body.startTime.toISOString(),
+          endTime: body.endTime.toISOString(),
+        }),
+      }),
+    patch: (id: string, body: Partial<Event>) =>
+      req<Event>(`/api/events/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    remove: (id: string) => req<{ ok: boolean }>(`/api/events/${id}`, { method: "DELETE" }),
   },
   projects: { list: () => req<Project[]>("/api/projects") },
   plans: {
@@ -164,7 +217,68 @@ export const api = {
         body: JSON.stringify(body),
       }),
   },
-  integrations: { list: () => req<Integration[]>("/api/integrations") },
+  recurring: {
+    list: () => req<Recurring[]>("/api/recurring"),
+    create: (body: {
+      title: string;
+      cadence: string;
+      cadenceDetail?: string | null;
+      time?: string | null;
+      estMin?: number | null;
+      projectId?: string | null;
+      priority?: "P0" | "P1" | "P2";
+      energy?: "low" | "med" | "high";
+      note?: string | null;
+    }) => req<Recurring>("/api/recurring", { method: "POST", body: JSON.stringify(body) }),
+    patch: (
+      id: string,
+      body: Partial<{
+        title: string;
+        cadence: string;
+        cadenceDetail: string | null;
+        time: string | null;
+        estMin: number | null;
+        paused: boolean;
+        priority: "P0" | "P1" | "P2";
+        energy: "low" | "med" | "high";
+        note: string | null;
+      }>,
+    ) =>
+      req<Recurring>(`/api/recurring/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    toggle: (id: string) =>
+      req<Recurring>(`/api/recurring/${id}/toggle`, { method: "POST" }),
+    remove: (id: string) =>
+      req<{ ok: boolean }>(`/api/recurring/${id}`, { method: "DELETE" }),
+    suggestions: () => req<RecurringSuggestion[]>("/api/recurring/suggestions"),
+    dismissSuggestion: (id: string) =>
+      req<{ ok: boolean }>(`/api/recurring/suggestions/${id}/dismiss`, {
+        method: "POST",
+      }),
+  },
+  integrations: {
+    list: () => req<Integration[]>("/api/integrations"),
+    create: (body: { provider: string; status?: string; detail?: string | null }) =>
+      req<{ id: string }>("/api/integrations", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    patch: (
+      id: string,
+      body: Partial<{
+        status: "connected" | "available" | "disconnected";
+        detail: string | null;
+      }>,
+    ) =>
+      req<Integration>(`/api/integrations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      }),
+    remove: (id: string) =>
+      req<{ ok: boolean }>(`/api/integrations/${id}`, { method: "DELETE" }),
+  },
   chat: {
     send: (text: string, conversationId?: string) =>
       req<{
@@ -173,4 +287,24 @@ export const api = {
       }>("/api/chat", { method: "POST", body: JSON.stringify({ text, conversationId }) }),
   },
   me: () => req<{ id: string; email: string; name: string; timezone: string }>("/api/me"),
+  settings: {
+    get: () => req<Record<string, { provider: string; model: string }>>("/api/settings"),
+    providers: () =>
+      req<{
+        providers: {
+          id: string;
+          label: string;
+          requiresApiKey: boolean;
+          keyEnvVar: string;
+          keyPresent: boolean;
+          models: { id: string; label: string; note?: string }[];
+        }[];
+        roles: { id: string; label: string; note: string }[];
+      }>("/api/settings/providers"),
+    put: (role: string, body: { provider: string; model: string }) =>
+      req<{ ok: boolean }>(`/api/settings/${role}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }),
+  },
 };

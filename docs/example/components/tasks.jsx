@@ -7,7 +7,7 @@ const COLUMNS = [
   { id: "done",   label: "Done" },
 ];
 
-const Tasks = ({ tasks, setTasks }) => {
+const Tasks = ({ tasks, setTasks, recurring, setRecurring, suggestions, setSuggestions }) => {
   const [dragId, setDragId] = React.useState(null);
   const [overCol, setOverCol] = React.useState(null);
 
@@ -16,7 +16,7 @@ const Tasks = ({ tasks, setTasks }) => {
   };
 
   return (
-    <div className="col" style={{ minHeight: 0, height: "100%" }}>
+    <div className="col" style={{ minHeight: 0, height: "100%", overflow: "auto" }}>
       <div className="page-hd">
         <div>
           <h1>Tasks</h1>
@@ -27,7 +27,8 @@ const Tasks = ({ tasks, setTasks }) => {
           <button className="btn primary"><Icon name="plus" size={14}/> New task</button>
         </div>
       </div>
-      <div className="kanban" style={{ flex: 1, minHeight: 0 }}>
+      <Habits recurring={recurring} setRecurring={setRecurring} suggestions={suggestions} setSuggestions={setSuggestions} />
+      <div className="kanban" style={{ minHeight: 480, height: 520 }}>
         {COLUMNS.map(col => {
           const items = tasks.filter(t => t.status === col.id);
           return (

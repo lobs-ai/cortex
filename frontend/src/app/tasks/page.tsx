@@ -6,6 +6,7 @@ import { api, type Task } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 import { Dot, PriorityChip } from "@/components/Primitives";
+import { Habits } from "@/components/Habits";
 
 const COLUMNS: { id: Task["status"]; label: string }[] = [
   { id: "inbox", label: "Inbox" },
@@ -43,7 +44,7 @@ export default function TasksPage() {
   const done = tasks.filter((t) => t.status === "done").length;
 
   return (
-    <div className="col" style={{ minHeight: 0, height: "100%" }}>
+    <div className="col" style={{ minHeight: 0, height: "100%", overflow: "auto" }}>
       <div className="page-hd">
         <div>
           <h1>Tasks</h1>
@@ -61,7 +62,9 @@ export default function TasksPage() {
         </div>
       </div>
 
-      <div className="kanban" style={{ flex: 1, minHeight: 0 }}>
+      <Habits projects={projects} />
+
+      <div className="kanban" style={{ minHeight: 480, height: 520 }}>
         {COLUMNS.map((col) => {
           const items = tasks.filter((t) => t.status === col.id);
           return (

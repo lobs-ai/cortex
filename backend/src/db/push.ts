@@ -181,6 +181,42 @@ CREATE TABLE IF NOT EXISTS assistant_messages (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS recurring_tasks (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  project_id TEXT,
+  cadence TEXT NOT NULL,
+  cadence_detail TEXT,
+  time_of_day TEXT,
+  estimated_minutes INTEGER,
+  priority TEXT NOT NULL DEFAULT 'P2',
+  energy_level TEXT NOT NULL DEFAULT 'med',
+  streak INTEGER NOT NULL DEFAULT 0,
+  weekly_rate REAL NOT NULL DEFAULT 0,
+  last_completed_at INTEGER,
+  paused INTEGER NOT NULL DEFAULT 0,
+  managed_by_ai INTEGER NOT NULL DEFAULT 0,
+  suggested_by TEXT,
+  note TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recurring_suggestions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  cadence TEXT,
+  confidence REAL NOT NULL DEFAULT 0.5,
+  evidence INTEGER NOT NULL DEFAULT 0,
+  related_recurring_id TEXT,
+  created_at INTEGER NOT NULL,
+  dismissed_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_blocks (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,

@@ -31,6 +31,8 @@ const App = () => {
   const [tweaksOpen, setTweaksOpen] = React.useState(false);
 
   const [tasks, setTasks] = React.useState(window.TASKS);
+  const [recurring, setRecurring] = React.useState(window.RECURRING);
+  const [recurringSuggestions, setRecurringSuggestions] = React.useState(window.RECURRING_SUGGESTIONS);
   const [alerts, setAlerts] = React.useState(window.ALERTS);
   const [messages, setMessages] = React.useState([]);
   const [calView, setCalView] = React.useState("day");
@@ -124,7 +126,7 @@ const App = () => {
           <div className="canvas">
             {tab === "dashboard" && <Dashboard onNav={setTab} />}
             {tab === "calendar"  && <Calendar view={calView} setView={setCalView} onDropTask={onDropTask} droppedTasks={scheduledBlocks} />}
-            {tab === "tasks"     && <Tasks tasks={tasks} setTasks={setTasks} />}
+            {tab === "tasks"     && <Tasks tasks={tasks} setTasks={setTasks} recurring={recurring} setRecurring={setRecurring} suggestions={recurringSuggestions} setSuggestions={setRecurringSuggestions} />}
             {tab === "chat"      && <Chat messages={messages} setMessages={setMessages} />}
             {tab === "memory"    && <Memory />}
           </div>

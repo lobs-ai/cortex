@@ -1,7 +1,8 @@
 import { findFreeBlocks } from "../services/scheduling.js";
 import { listEvents } from "../services/events.js";
 import { listTasks } from "../services/tasks.js";
-import { LLM_MODEL, llmClient } from "./client.js";
+import { llmClient } from "./client.js";
+import { getRoleModel } from "../services/settings.js";
 
 export type PlanBlock = { start: string; end: string; label: string; sub?: string; kind: string; hero?: boolean };
 export type DailyPlan = { summary: string; blocks: PlanBlock[]; generatedBy: string };
@@ -15,6 +16,8 @@ export async function generateDailyPlan(userId: string, date: Date): Promise<Dai
 
   const client = llmClient();
   if (!client) return heuristicPlan(events, tasks, free);
+
+  const cfg = await getRoleModel(userId, "planner");
 
   const context = {
     date: date.toISOString().slice(0, 10),
@@ -36,7 +39,7 @@ export async function generateDailyPlan(userId: string, date: Date): Promise<Dai
 
   try {
     const resp = await client.messages.create({
-      model: LLM_MODEL,
+      model: cfg.model,
       max_tokens: 800,
       system,
       messages: [{ role: "user", content: `CONTEXT:\n${JSON.stringify(context, null, 2)}` }],
@@ -46,7 +49,7 @@ export async function generateDailyPlan(userId: string, date: Date): Promise<Dai
     const jsonEnd = text.lastIndexOf("}");
     if (jsonStart >= 0 && jsonEnd > jsonStart) {
       const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
-      return { summary: parsed.summary, blocks: parsed.blocks ?? [], generatedBy: `planner:${LLM_MODEL}` };
+      return { summary: parsed.summary, blocks: parsed.blocks ?? [], generatedBy: `planner:${cfg.model}` };
     }
   } catch (err) {
     console.error("planner LLM failure; using heuristic:", err);

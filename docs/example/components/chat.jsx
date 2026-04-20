@@ -1,6 +1,9 @@
 // Chat page with streaming-feel
 
 const CANNED = {
+  "recurring": "Got it — I'll make it recurring. Based on your pattern, I'd suggest daily at 09:00 for 30 minutes. I'll manage this one: pause during crunch weeks, resume after, and adjust the time if I see you drifting. You can always edit it on the Tasks page under Habits.",
+  "habit": "Your habits are mostly on track. You're at a 22-day streak for 'read 1 paper' — nice. I paused 'grade 2 submissions' until after the rebuttal ships. Want me to look for new habit candidates?",
+  "daily": "I can add that as a daily. I'll schedule it into your calendar automatically each morning and hold the slot unless you have a conflict. Confirm and I'll create it.",
   "default": "Let me take a look... based on what's on your plate, I'd tackle the NeurIPS rebuttal next — it's the only P0 with a hard deadline inside 48h.",
   "rebuttal": "Yeah, the rebuttal is the blocker. You've got ~5h of writing left based on your outline, and your writing tasks historically run 35% over — so call it 6.5h. I'd split it: 4h today (11:00–12:30 + 16:00–18:00), 2.5h tomorrow morning.",
   "plan": "Okay — here's what I'd run. Your deep-work window is 11:00–12:30, which is your strongest. Everything else slots around your meetings.",
@@ -12,6 +15,9 @@ const CANNED = {
 
 const pickCanned = (text) => {
   const t = text.toLowerCase();
+  if (t.includes("recurring") || t.includes("every week") || t.includes("make this")) return CANNED.recurring;
+  if (t.includes("daily") || t.includes("every day") || t.includes("every morning")) return CANNED.daily;
+  if (t.includes("habit") || t.includes("streak")) return CANNED.habit;
   if (t.includes("rebuttal")) return CANNED.rebuttal;
   if (t.includes("plan") || t.includes("today")) return CANNED.plan;
   if (t.includes("behind") || t.includes("overdue")) return CANNED.behind;
@@ -23,9 +29,9 @@ const pickCanned = (text) => {
 
 const SUGGESTIONS = [
   "What should I focus on today?",
-  "When can I fit a 2-hour focus block?",
+  "Make 'prep for advisor 1:1' recurring",
+  "How are my habits doing?",
   "What am I behind on?",
-  "Move the 3pm reading group",
   "Plan my tomorrow",
 ];
 

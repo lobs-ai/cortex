@@ -4,23 +4,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   python3 make g++ \
   && rm -rf /var/lib/apt/lists/*
 
-FROM base AS deps
-COPY backend/package.json backend/package-lock.json* ./
-RUN npm install --omit=dev --no-audit --no-fund || npm install --no-audit --no-fund
+# ---- Build the frontend (produces /app/frontend/.next) ----
+FROM base AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+COPY frontend/tsconfig.json frontend/next.config.mjs frontend/next-env.d.ts ./
+COPY frontend/src ./src
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npx next build
 
-FROM base AS build
+# ---- Build the backend (produces /app/backend/dist) ----
+FROM base AS backend-build
+WORKDIR /app/backend
 COPY backend/package.json backend/package-lock.json* ./
 RUN npm install --no-audit --no-fund
 COPY backend/tsconfig.json ./
 COPY backend/src ./src
 RUN npx tsc -p tsconfig.json
 
-FROM node:20-bookworm-slim AS runtime
-WORKDIR /app
+# ---- Runtime: both node_modules trees + built artifacts ----
+FROM base AS runtime
 ENV NODE_ENV=production
 ENV PORT=9009
-COPY --from=deps  /app/node_modules ./node_modules
-COPY --from=build /app/dist          ./dist
-COPY backend/package.json ./
+ENV CORTEX_ENV=production
+
+WORKDIR /app/frontend
+COPY --from=frontend-build /app/frontend/.next          ./.next
+COPY --from=frontend-build /app/frontend/node_modules   ./node_modules
+COPY --from=frontend-build /app/frontend/package.json   ./
+COPY --from=frontend-build /app/frontend/next.config.mjs ./
+
+WORKDIR /app/backend
+COPY --from=backend-build /app/backend/node_modules ./node_modules
+COPY --from=backend-build /app/backend/dist         ./dist
+COPY --from=backend-build /app/backend/package.json ./
+
 EXPOSE 9009
 CMD ["node", "dist/server.js"]

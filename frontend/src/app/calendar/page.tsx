@@ -1,17 +1,23 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Event } from "@/lib/api";
 import { fmtHM, fmtDateShort, fmtWeekday } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 
 type View = "day" | "week" | "month";
-const HOURS = Array.from({ length: 14 }, (_, i) => i + 7); // 7..20
+
+// Full 24-hour day, 48 px per row. The grid scrolls.
+const HOURS = Array.from({ length: 24 }, (_, i) => i);
+const HOUR_PX = 48;
+const GRID_HEIGHT = HOURS.length * HOUR_PX;
 
 export default function CalendarPage() {
+  const qc = useQueryClient();
   const [view, setView] = useState<View>("day");
   const [weekOffset, setWeekOffset] = useState(0);
+  const [showCreate, setShowCreate] = useState(false);
 
   const today = useMemo(() => {
     const t = new Date();
@@ -33,6 +39,15 @@ export default function CalendarPage() {
   const { data: events = [] } = useQuery({
     queryKey: ["events", rangeFrom.toISOString(), rangeTo.toISOString()],
     queryFn: () => api.events.list(rangeFrom, rangeTo),
+  });
+
+  const createEvent = useMutation({
+    mutationFn: (body: { title: string; startTime: Date; endTime: Date; kind: Event["kind"]; location?: string }) =>
+      api.events.create(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["events"] });
+      setShowCreate(false);
+    },
   });
 
   const eventsByDay = useMemo(() => {
@@ -73,7 +88,7 @@ export default function CalendarPage() {
             </button>
           ))}
         </div>
-        <button className="btn">
+        <button className="btn" onClick={() => setShowCreate(true)}>
           <Icon name="plus" size={14} /> New event
         </button>
       </div>
@@ -83,6 +98,15 @@ export default function CalendarPage() {
         <WeekGrid today={today} eventsByDay={eventsByDay} weekOffset={weekOffset} />
       )}
       {view === "month" && <MonthView today={today} eventsByDay={eventsByDay} />}
+
+      {showCreate && (
+        <NewEventModal
+          defaultDate={today}
+          onClose={() => setShowCreate(false)}
+          onSubmit={(v) => createEvent.mutate(v)}
+          pending={createEvent.isPending}
+        />
+      )}
     </div>
   );
 }
@@ -92,8 +116,8 @@ function eventStyle(e: Event, base: Date) {
   const t = new Date(e.end);
   const startMin = (+s - +base) / 60000;
   const endMin = (+t - +base) / 60000;
-  const top = ((startMin - 7 * 60) / 60) * 56;
-  const height = Math.max(20, ((endMin - startMin) / 60) * 56);
+  const top = (startMin / 60) * HOUR_PX;
+  const height = Math.max(20, ((endMin - startMin) / 60) * HOUR_PX);
   return { top, height };
 }
 
@@ -107,11 +131,11 @@ function DayColumn({
   isToday: boolean;
 }) {
   const now = new Date();
-  const nowMin = (now.getHours() - 7) * 60 + now.getMinutes();
-  const nowTop = (nowMin / 60) * 56;
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const nowTop = (nowMin / 60) * HOUR_PX;
 
   return (
-    <div className="day-col" style={{ position: "relative", height: HOURS.length * 56 }}>
+    <div className="day-col" style={{ position: "relative", height: GRID_HEIGHT }}>
       {events.map((ev) => {
         const { top, height } = eventStyle(ev, date);
         return (
@@ -124,11 +148,33 @@ function DayColumn({
           </div>
         );
       })}
-      {isToday && nowTop > 0 && nowTop < HOURS.length * 56 && (
+      {isToday && nowTop > 0 && nowTop < GRID_HEIGHT && (
         <div className="evt now-line" style={{ top: nowTop }} />
       )}
     </div>
   );
+}
+
+function HourColumn() {
+  return (
+    <div className="hours">
+      {HOURS.map((h) => (
+        <div key={h} className="hour" style={{ height: HOUR_PX }}>
+          {String(h).padStart(2, "0")}:00
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Scroll the grid so that current hour is ~25% from the top on first paint.
+function useAutoScrollToNow(ref: React.RefObject<HTMLElement>) {
+  useEffect(() => {
+    if (!ref.current) return;
+    const now = new Date();
+    const targetTop = Math.max(0, (now.getHours() - 2) * HOUR_PX);
+    ref.current.scrollTop = targetTop;
+  }, [ref]);
 }
 
 function DayGrid({
@@ -139,13 +185,12 @@ function DayGrid({
   eventsByDay: Map<number, Event[]>;
 }) {
   const events = eventsByDay.get(+today) ?? [];
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useAutoScrollToNow(scrollRef);
+
   return (
-    <div className="day-grid">
-      <div className="hours">
-        {HOURS.map((h) => (
-          <div key={h} className="hour">{String(h).padStart(2, "0")}:00</div>
-        ))}
-      </div>
+    <div className="day-grid" ref={scrollRef}>
+      <HourColumn />
       <DayColumn date={today} events={events} isToday={true} />
     </div>
   );
@@ -166,6 +211,8 @@ function WeekGrid({
     dt.setHours(0, 0, 0, 0);
     return dt;
   });
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useAutoScrollToNow(scrollRef);
 
   return (
     <div className="col" style={{ minHeight: 0, overflow: "hidden" }}>
@@ -181,12 +228,8 @@ function WeekGrid({
           );
         })}
       </div>
-      <div className="week-grid">
-        <div className="hours">
-          {HOURS.map((h) => (
-            <div key={h} className="hour">{String(h).padStart(2, "0")}:00</div>
-          ))}
-        </div>
+      <div className="week-grid" ref={scrollRef}>
+        <HourColumn />
         {days.map((d, i) => (
           <DayColumn
             key={i}
@@ -282,4 +325,181 @@ function kindToCss(kind: string) {
             ? "red"
             : "muted"
   })`;
+}
+
+function NewEventModal({
+  defaultDate,
+  onClose,
+  onSubmit,
+  pending,
+}: {
+  defaultDate: Date;
+  onClose: () => void;
+  onSubmit: (v: {
+    title: string;
+    startTime: Date;
+    endTime: Date;
+    kind: Event["kind"];
+    location?: string;
+  }) => void;
+  pending: boolean;
+}) {
+  const defaultStart = useMemo(() => {
+    const d = new Date();
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() + 1);
+    return toLocalInputValue(d);
+  }, []);
+  const defaultEnd = useMemo(() => {
+    const d = new Date();
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() + 2);
+    return toLocalInputValue(d);
+  }, []);
+
+  const [title, setTitle] = useState("");
+  const [location, setLocation] = useState("");
+  const [kind, setKind] = useState<Event["kind"]>("meeting");
+  const [start, setStart] = useState(defaultStart);
+  const [end, setEnd] = useState(defaultEnd);
+  void defaultDate;
+
+  return (
+    <div
+      role="dialog"
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,.5)",
+        display: "grid",
+        placeItems: "center",
+        zIndex: 200,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="panel"
+        style={{ width: 420, background: "var(--panel)" }}
+      >
+        <div className="panel-hd">
+          <span className="title">
+            <b>New event</b>
+          </span>
+          <button className="btn ghost" onClick={onClose}>
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+        <div className="panel-bd" style={{ display: "grid", gap: 10 }}>
+          <label className="col" style={{ gap: 4 }}>
+            <span className="caps">Title</span>
+            <input
+              className="mono"
+              style={{
+                border: "1px solid var(--hair-2)",
+                padding: "6px 8px",
+                background: "var(--bg)",
+                fontSize: 13,
+              }}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              autoFocus
+            />
+          </label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <label className="col" style={{ gap: 4 }}>
+              <span className="caps">Start</span>
+              <input
+                type="datetime-local"
+                className="mono"
+                style={{
+                  border: "1px solid var(--hair-2)",
+                  padding: "6px 8px",
+                  background: "var(--bg)",
+                  fontSize: 12,
+                }}
+                value={start}
+                onChange={(e) => setStart(e.target.value)}
+              />
+            </label>
+            <label className="col" style={{ gap: 4 }}>
+              <span className="caps">End</span>
+              <input
+                type="datetime-local"
+                className="mono"
+                style={{
+                  border: "1px solid var(--hair-2)",
+                  padding: "6px 8px",
+                  background: "var(--bg)",
+                  fontSize: 12,
+                }}
+                value={end}
+                onChange={(e) => setEnd(e.target.value)}
+              />
+            </label>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <label className="col" style={{ gap: 4 }}>
+              <span className="caps">Kind</span>
+              <select
+                style={{
+                  border: "1px solid var(--hair-2)",
+                  padding: "6px 8px",
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  fontSize: 12,
+                }}
+                value={kind}
+                onChange={(e) => setKind(e.target.value as Event["kind"])}
+              >
+                <option value="meeting">meeting</option>
+                <option value="class">class</option>
+                <option value="teach">teach</option>
+                <option value="personal">personal</option>
+                <option value="deadline">deadline</option>
+                <option value="block">block</option>
+              </select>
+            </label>
+            <label className="col" style={{ gap: 4 }}>
+              <span className="caps">Location</span>
+              <input
+                className="mono"
+                style={{
+                  border: "1px solid var(--hair-2)",
+                  padding: "6px 8px",
+                  background: "var(--bg)",
+                  fontSize: 12,
+                }}
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="row gap-2" style={{ justifyContent: "flex-end", marginTop: 4 }}>
+            <button className="btn ghost" onClick={onClose}>Cancel</button>
+            <button
+              className="btn primary"
+              disabled={!title.trim() || pending}
+              onClick={() =>
+                onSubmit({
+                  title: title.trim(),
+                  startTime: new Date(start),
+                  endTime: new Date(end),
+                  kind,
+                  location: location.trim() || undefined,
+                })
+              }
+            >
+              {pending ? "Creating…" : "Create"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function toLocalInputValue(d: Date) {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

@@ -1,8 +1,9 @@
-import { LLM_MODEL, llmClient } from "./client.js";
+import { llmClient } from "./client.js";
 import { listTasks } from "../services/tasks.js";
 import { listEvents } from "../services/events.js";
 import { listProjects } from "../services/projects.js";
 import { listTendencies } from "../services/memory.js";
+import { getRoleModel } from "../services/settings.js";
 
 export type ChatCard =
   | { kind: "plan"; title: string; blocks: { start: string; end: string; label: string; task?: string; event?: string }[] }
@@ -87,9 +88,13 @@ export async function chatReply(userId: string, userText: string, history: { rol
     `CONTEXT:\n${JSON.stringify(context, null, 2)}`,
   ].join("\n");
 
+  const cfg = await getRoleModel(userId, "chat");
+  // Only Anthropic is wired right now; if the user picked another provider the
+  // SDK call still uses Anthropic's API with whatever model string they chose —
+  // this is a clear "Phase 2" hook point for openai/openrouter adapters.
   try {
     const resp = await client.messages.create({
-      model: LLM_MODEL,
+      model: cfg.model,
       max_tokens: 600,
       system,
       messages: [

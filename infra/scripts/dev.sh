@@ -8,6 +8,4 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 (cd "$ROOT/frontend" && npm install)
 
 echo
-echo "Run in two terminals:"
-echo "  cd backend  && npm run dev     # :9009"
-echo "  cd frontend && npm run dev     # :3030"
+echo "Run from backend/:  npm run dev    # Fastify + embedded Next on :9009"

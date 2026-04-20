@@ -125,3 +125,68 @@ Built **Cortex** — a full tabbed prototype of the personal AI executive assist
 
 Sample data is a CSE grad student mid-NeurIPS rebuttal — advisor 1:1s, 598 lectures, 484 GSI office hours, thesis ablations, the works.
 
+## User
+
+add the ability for reoccurring and daily tasks to be setup and managed by the ai assistant
+
+## Assistant
+
+_[tool: snip]_
+
+I'll add recurring task support — a new "Habits & Recurring" section with AI management. Let me plan:
+
+1. Extend data with recurring task definitions (daily habits, weekly recurring, etc.)
+2. Add a "Habits" section on the Tasks page showing today's recurring instances
+3. Add AI-management UI — suggestions to create, adjust, pause, or remove recurring tasks based on patterns
+4. Add a chat intent for "make X daily" / "make this weekly"
+
+_[tool: read_file]_
+
+_[tool: snip]_
+
+_[tool: str_replace_edit]_
+
+Now I'll create the Habits component and wire it in.
+
+_[tool: write_file]_
+
+_[tool: snip]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+I also need to make the Tasks page layout work with the new Habits panel above the kanban. Let me fix the column heights and overflow.
+
+_[tool: snip]_
+
+_[tool: read_file]_
+
+_[tool: snip]_
+
+_[tool: str_replace_edit]_
+
+_[tool: str_replace_edit]_
+
+Now let me also add chat intent for recurring tasks and verify.
+
+_[tool: str_replace_edit]_
+
+_[tool: done]_
+
+_[tool: snip]_
+
+_[tool: fork_verifier_agent]_
+
+## User
+
+A background task has completed. Here are the results:
+
+## Assistant
+
