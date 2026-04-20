@@ -23,8 +23,8 @@ cp .env.example .env
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-- Frontend: http://localhost:3000
-- Backend:  http://localhost:8000 (Swagger/OpenAPI at `/docs`)
+- Frontend: http://localhost (via nginx) or http://localhost:3030 direct
+- Backend:  http://localhost:9009
 
 ## Quick start (local, no docker)
 
@@ -38,14 +38,14 @@ cd backend
 npm install
 npm run db:push         # apply schema
 npm run seed            # seed demo data
-npm run dev             # Fastify on :8000
+npm run dev             # Fastify on :9009
 ```
 
 ```bash
 # terminal 2 — frontend
 cd frontend
 npm install
-npm run dev             # Next.js on :3000
+npm run dev             # Next.js on :3030
 ```
 
 ## Demo data

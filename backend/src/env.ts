@@ -7,7 +7,7 @@ export const env = {
   JWT_SECRET: process.env.JWT_SECRET || "dev-secret",
   ENCRYPTION_KEY: process.env.ENCRYPTION_KEY || "dev-encryption-key",
   CORTEX_ENV: process.env.CORTEX_ENV || "dev",
-  CORS_ORIGINS: (process.env.CORS_ORIGINS || "http://localhost:3000")
+  CORS_ORIGINS: (process.env.CORS_ORIGINS || "http://localhost:3030,http://localhost:3000")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),

@@ -77,7 +77,15 @@ export async function runMonitor(userId: string): Promise<Proposal[]> {
   const fresh = proposals.filter((p) => !seen.has(`${p.kind}:${p.relatedId ?? ""}`));
 
   for (const p of fresh) {
-    await createNotification(userId, p);
+    await createNotification(userId, {
+      severity: p.severity,
+      kind: p.kind,
+      title: p.title,
+      body: p.body,
+      actions: p.actions,
+      relatedObjectType: p.relatedType,
+      relatedObjectId: p.relatedId,
+    });
   }
 
   return fresh;
