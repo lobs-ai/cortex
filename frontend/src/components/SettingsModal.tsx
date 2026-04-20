@@ -581,9 +581,14 @@ function IntegrationCard({
   let statusText: string;
   let statusColor: "green" | "yellow" | "muted";
   if (spec.oauth) {
-    const masterRow = integrations.find((i) => i.provider === spec.configProvider);
-    if (masterRow?.status === "connected") {
-      statusText = masterRow.detail ? `connected · ${masterRow.detail}` : "connected";
+    const masterRows = integrations.filter(
+      (i) => i.provider === spec.configProvider && i.status === "connected",
+    );
+    if (masterRows.length > 1) {
+      statusText = `${masterRows.length} accounts connected`;
+      statusColor = "green";
+    } else if (masterRows.length === 1) {
+      statusText = masterRows[0].detail ? `connected · ${masterRows[0].detail}` : "connected";
       statusColor = "green";
     } else {
       statusText = "not connected";
@@ -922,8 +927,10 @@ function ActionBlock({
     return null;
   }
 
-  const master = integrations.find((i) => i.provider === spec.configProvider);
-  const connected = master?.status === "connected";
+  const masterRows = integrations.filter(
+    (i) => i.provider === spec.configProvider && i.status === "connected",
+  );
+  const anyConnected = masterRows.length > 0;
   const configured = googleStatus?.configured ?? false;
 
   const connect = async () => {
@@ -950,7 +957,7 @@ function ActionBlock({
   });
 
   const disconnect = useMutation({
-    mutationFn: () => api.integrations.disconnectGoogle(),
+    mutationFn: (masterId: string) => api.integrations.disconnectGoogle(masterId),
     onSuccess: () => {
       setError(null);
       onChanged();
@@ -977,46 +984,72 @@ function ActionBlock({
           Save your OAuth client ID and secret above first, then come back here
           to connect.
         </div>
-      ) : connected ? (
-        <div>
-          <div className="muted mono" style={{ fontSize: 10.5, marginBottom: 8 }}>
-            Connected as {master?.detail ?? "unknown"} ·{" "}
-            {master?.lastSyncedAt
-              ? `last synced ${new Date(master.lastSyncedAt).toLocaleString()}`
-              : "never synced"}
-          </div>
-          <div className="row gap-2">
-            <button
-              type="button"
-              className="btn"
-              onClick={() => sync.mutate()}
-              disabled={sync.isPending}
-            >
-              {sync.isPending ? "Syncing…" : "Sync calendar now"}
-            </button>
-            <button
-              type="button"
-              className="btn ghost"
-              onClick={() => {
-                if (confirm("Disconnect Google? This revokes tokens and turns off all three features."))
-                  disconnect.mutate();
-              }}
-              disabled={disconnect.isPending}
-            >
-              Disconnect Google
-            </button>
-          </div>
-          <CalendarWriteSection onChanged={onChanged} />
-        </div>
       ) : (
-        <button
-          type="button"
-          className="btn primary"
-          onClick={connect}
-          disabled={connecting}
-        >
-          {connecting ? "Opening Google…" : `Connect ${spec.label}`}
-        </button>
+        <div style={{ display: "grid", gap: 8 }}>
+          {masterRows.map((master) => (
+            <div
+              key={master.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "7px 10px",
+                border: "1px solid var(--hair-2)",
+                borderRadius: 4,
+                background: "color-mix(in oklch, var(--green), transparent 92%)",
+              }}
+            >
+              <span style={{ fontSize: 11.5, flex: 1 }}>
+                <span className="mono" style={{ color: "var(--green)" }}>✓</span>{" "}
+                {master.detail ?? "unknown"}
+                <span className="muted mono" style={{ fontSize: 10, marginLeft: 8 }}>
+                  {master.lastSyncedAt
+                    ? `synced ${new Date(master.lastSyncedAt).toLocaleString()}`
+                    : "never synced"}
+                </span>
+              </span>
+              <button
+                type="button"
+                className="btn ghost"
+                style={{ fontSize: 11 }}
+                onClick={() => {
+                  if (confirm(`Disconnect ${master.detail ?? "this account"}? This revokes its tokens.`))
+                    disconnect.mutate(master.id);
+                }}
+                disabled={disconnect.isPending}
+              >
+                Disconnect
+              </button>
+            </div>
+          ))}
+
+          <div className="row gap-2">
+            {anyConnected && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => sync.mutate()}
+                disabled={sync.isPending}
+              >
+                {sync.isPending ? "Syncing…" : "Sync calendars now"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn primary"
+              onClick={connect}
+              disabled={connecting}
+            >
+              {connecting
+                ? "Opening Google…"
+                : anyConnected
+                  ? "Connect another account"
+                  : `Connect ${spec.label}`}
+            </button>
+          </div>
+
+          {anyConnected && <CalendarSyncSection onChanged={onChanged} />}
+        </div>
       )}
       {error && (
         <div style={{ color: "var(--red, #ef4444)", fontSize: 11.5, marginTop: 8 }}>
@@ -1027,19 +1060,32 @@ function ActionBlock({
   );
 }
 
-function CalendarWriteSection({ onChanged }: { onChanged: () => void }) {
+function CalendarSyncSection({ onChanged }: { onChanged: () => void }) {
   const qc = useQueryClient();
   const { data: calendars, isError } = useQuery({
     queryKey: ["google-calendars"],
     queryFn: () => api.integrations.listGoogleCalendars(),
     retry: false,
   });
+  const { data: readData } = useQuery({
+    queryKey: ["google-read-calendars"],
+    queryFn: () => api.integrations.getReadCalendars(),
+  });
   const { data: writeCalData } = useQuery({
     queryKey: ["google-write-calendar"],
     queryFn: () => api.integrations.getWriteCalendar(),
   });
 
-  const save = useMutation({
+  const saveRead = useMutation({
+    mutationFn: (selections: { calendarId: string; masterId: string }[]) =>
+      api.integrations.setReadCalendars(selections),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["google-read-calendars"] });
+      onChanged();
+    },
+  });
+
+  const saveWrite = useMutation({
     mutationFn: (calendarId: string | null) => api.integrations.setWriteCalendar(calendarId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["google-write-calendar"] });
@@ -1047,37 +1093,106 @@ function CalendarWriteSection({ onChanged }: { onChanged: () => void }) {
     },
   });
 
-  const currentId = writeCalData?.calendarId ?? null;
+  const readSelections = readData?.selections ?? [];
+  const writeCalId = writeCalData?.calendarId ?? null;
+
+  const isReadSelected = (calendarId: string, masterId: string) =>
+    readSelections.some((s) => s.calendarId === calendarId && s.masterId === masterId);
+
+  const toggleRead = (calendarId: string, masterId: string, checked: boolean) => {
+    const next = checked
+      ? [...readSelections, { calendarId, masterId }]
+      : readSelections.filter((s) => !(s.calendarId === calendarId && s.masterId === masterId));
+    saveRead.mutate(next);
+  };
+
+  // Group calendars by account for display
+  const byAccount = new Map<string, { email: string; masterId: string; cals: typeof calendars }>();
+  for (const c of calendars ?? []) {
+    if (!byAccount.has(c.masterId)) {
+      byAccount.set(c.masterId, { email: c.accountEmail, masterId: c.masterId, cals: [] });
+    }
+    byAccount.get(c.masterId)!.cals!.push(c);
+  }
 
   return (
-    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--hair-2)" }}>
-      <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 8 }}>
-        Write calendar
-      </div>
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--hair-2)", display: "grid", gap: 14 }}>
       {isError ? (
         <div className="muted" style={{ fontSize: 11.5 }}>
-          Reconnect Google with the latest scopes to enable calendar write access.
+          Reconnect Google with the latest scopes to enable calendar access.
         </div>
       ) : !calendars ? (
-        <div className="muted" style={{ fontSize: 11.5 }}>Loading…</div>
+        <div className="muted" style={{ fontSize: 11.5 }}>Loading calendars…</div>
       ) : (
         <>
-          <select
-            value={currentId ?? ""}
-            onChange={(e) => save.mutate(e.target.value || null)}
-            style={{ ...selectStyle, width: "100%" }}
-          >
-            <option value="">None — don&apos;t write to Google Calendar</option>
-            {calendars.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.summary}{c.primary ? " (primary)" : ""}
-              </option>
-            ))}
-          </select>
-          <div className="muted" style={{ fontSize: 10.5, marginTop: 4 }}>
-            {currentId
-              ? "Agent-created events will be pushed to this calendar."
-              : "Pick a calendar and agent-created events will appear there automatically."}
+          {/* Read calendars */}
+          <div>
+            <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 6 }}>
+              Read from (sync these calendars)
+            </div>
+            <div className="muted" style={{ fontSize: 10.5, marginBottom: 8 }}>
+              Leave all unchecked to sync only primary calendars.
+            </div>
+            <div style={{ display: "grid", gap: 2 }}>
+              {[...byAccount.values()].map((acct) => (
+                <div key={acct.masterId}>
+                  <div
+                    className="muted mono"
+                    style={{ fontSize: 10, padding: "4px 0 2px", textTransform: "uppercase", letterSpacing: ".06em" }}
+                  >
+                    {acct.email}
+                  </div>
+                  {acct.cals?.map((c) => (
+                    <label
+                      key={c.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                        fontSize: 12,
+                        borderRadius: 3,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isReadSelected(c.id, c.masterId)}
+                        onChange={(e) => toggleRead(c.id, c.masterId, e.target.checked)}
+                        disabled={saveRead.isPending}
+                      />
+                      <span>{c.summary}</span>
+                      {c.primary && (
+                        <span className="muted" style={{ fontSize: 10 }}>primary</span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Write calendar */}
+          <div>
+            <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 6 }}>
+              Write to (agent-created events)
+            </div>
+            <select
+              value={writeCalId ?? ""}
+              onChange={(e) => saveWrite.mutate(e.target.value || null)}
+              style={{ ...selectStyle, width: "100%" }}
+            >
+              <option value="">None — don&apos;t write to Google Calendar</option>
+              {[...byAccount.values()].map((acct) => (
+                <optgroup key={acct.masterId} label={acct.email}>
+                  {acct.cals?.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.summary}{c.primary ? " (primary)" : ""}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
           </div>
         </>
       )}
@@ -1094,8 +1209,9 @@ function FeatureTogglesBlock({
   integrations: Integration[];
   onChanged: () => void;
 }) {
-  const master = integrations.find((i) => i.provider === spec.configProvider);
-  const masterConnected = master?.status === "connected";
+  const masterConnected = integrations.some(
+    (i) => i.provider === spec.configProvider && i.status === "connected",
+  );
 
   return (
     <div>
@@ -1257,6 +1373,13 @@ const inputStyle: React.CSSProperties = {
 };
 
 function Overlay({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   return (
     <div
       role="dialog"

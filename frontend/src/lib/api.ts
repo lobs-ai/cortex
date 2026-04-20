@@ -81,12 +81,19 @@ export type PlanBlock = {
   hero?: boolean;
 };
 
+export type PlanInputs = {
+  events: { title: string; start: string; end: string; kind: string; location: string | null }[];
+  freeBlocks: { start: string; end: string }[];
+  tasks: { id: string; title: string; priority: string; due: string | null; estMin: number | null; status: string }[];
+  guidance?: string;
+};
+
 export type Plan = {
   id: string;
   type: string;
   periodStart: string;
   periodEnd: string;
-  content: { summary: string; blocks: PlanBlock[]; generatedAt?: string };
+  content: { summary: string; blocks: PlanBlock[]; generatedAt?: string; inputs?: PlanInputs };
   generatedBy: string;
   createdAt: string;
 };
@@ -148,6 +155,24 @@ export type Integration = {
   lastSyncedAt: string | null;
 };
 
+export type JournalEntry = {
+  id: string;
+  eventId: string | null;
+  kind: "reflection" | "quick_log";
+  rating: number | null;
+  note: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NearestEvent = {
+  id: string;
+  title: string;
+  start: string;
+  end: string;
+  match: "happening" | "recent" | "upcoming";
+} | null;
+
 export type ChatCard =
   | { kind: "plan"; title: string; blocks: { start: string; end: string; label: string }[] }
   | { kind: "items"; title: string; blocks: { label: string; sub: string }[] };
@@ -195,8 +220,27 @@ export const api = {
           endTime: body.endTime.toISOString(),
         }),
       }),
-    patch: (id: string, body: Partial<Event>) =>
-      req<Event>(`/api/events/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    patch: (
+      id: string,
+      body: Partial<{
+        title: string;
+        description: string;
+        location: string;
+        startTime: Date;
+        endTime: Date;
+        kind: Event["kind"];
+        projectId: string | null;
+        important: boolean;
+      }>,
+    ) =>
+      req<Event>(`/api/events/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          ...body,
+          ...(body.startTime ? { startTime: body.startTime.toISOString() } : {}),
+          ...(body.endTime ? { endTime: body.endTime.toISOString() } : {}),
+        }),
+      }),
     remove: (id: string) => req<{ ok: boolean }>(`/api/events/${id}`, { method: "DELETE" }),
     rsvp: (
       id: string,
@@ -216,13 +260,42 @@ export const api = {
   projects: { list: () => req<Project[]>("/api/projects") },
   plans: {
     today: () => req<Plan | null>("/api/plans/today"),
-    generate: () => req<Plan>("/api/plans/generate", { method: "POST", body: "{}" }),
+    generate: (body?: { guidance?: string }) =>
+      req<Plan>("/api/plans/generate", {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
+      }),
   },
   notifications: {
     list: () => req<Alert[]>("/api/notifications"),
     dismiss: (id: string) =>
       req<{ ok: boolean }>(`/api/notifications/${id}/dismiss`, { method: "POST" }),
     scan: () => req<{ created: number }>("/api/notifications/scan", { method: "POST" }),
+  },
+  journal: {
+    list: (params?: { eventId?: string; unattached?: boolean; kind?: "reflection" | "quick_log"; limit?: number; from?: Date; to?: Date }) => {
+      const qs = new URLSearchParams();
+      if (params?.eventId) qs.set("eventId", params.eventId);
+      if (params?.unattached) qs.set("unattached", "true");
+      if (params?.kind) qs.set("kind", params.kind);
+      if (params?.limit) qs.set("limit", String(params.limit));
+      if (params?.from) qs.set("from", params.from.toISOString());
+      if (params?.to) qs.set("to", params.to.toISOString());
+      const q = qs.toString();
+      return req<JournalEntry[]>(`/api/journal${q ? `?${q}` : ""}`);
+    },
+    create: (body: { kind: "reflection" | "quick_log"; eventId?: string | null; rating?: number | null; note?: string }) =>
+      req<JournalEntry>("/api/journal", { method: "POST", body: JSON.stringify(body) }),
+    patch: (id: string, body: Partial<{ eventId: string | null; rating: number | null; note: string }>) =>
+      req<JournalEntry>(`/api/journal/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    remove: (id: string) => req<{ ok: boolean }>(`/api/journal/${id}`, { method: "DELETE" }),
+    nearestEvent: (at?: Date, windowMinutes?: number) => {
+      const qs = new URLSearchParams();
+      if (at) qs.set("at", at.toISOString());
+      if (windowMinutes) qs.set("windowMinutes", String(windowMinutes));
+      const q = qs.toString();
+      return req<NearestEvent>(`/api/journal/nearest-event${q ? `?${q}` : ""}`);
+    },
   },
   memory: {
     preferences: () => req<Preference[]>("/api/memory/preferences"),
@@ -341,12 +414,24 @@ export const api = {
         "/api/calendar/sync",
         { method: "POST" },
       ),
-    disconnectGoogle: () =>
-      req<{ ok: boolean }>("/api/integrations/google/disconnect", { method: "POST" }),
+    disconnectGoogle: (masterId?: string) =>
+      req<{ ok: boolean }>("/api/integrations/google/disconnect", {
+        method: "POST",
+        body: masterId ? JSON.stringify({ masterId }) : undefined,
+      }),
     listGoogleCalendars: () =>
-      req<Array<{ id: string; summary: string; primary: boolean }>>(
+      req<Array<{ id: string; summary: string; primary: boolean; masterId: string; accountEmail: string }>>(
         "/api/integrations/google/calendars",
       ),
+    getReadCalendars: () =>
+      req<{ selections: Array<{ calendarId: string; masterId: string }> }>(
+        "/api/integrations/google/read-calendars",
+      ),
+    setReadCalendars: (selections: Array<{ calendarId: string; masterId: string }>) =>
+      req<{ ok: boolean }>("/api/integrations/google/read-calendars", {
+        method: "PUT",
+        body: JSON.stringify({ selections }),
+      }),
     getWriteCalendar: () =>
       req<{ calendarId: string | null }>("/api/integrations/google/write-calendar"),
     setWriteCalendar: (calendarId: string | null) =>

@@ -123,7 +123,7 @@ export async function upsertGoogleConnection(
 ): Promise<void> {
   const now = new Date();
 
-  // Preserve prior refresh token if Google omitted one (silent re-consent).
+  // Key on (userId, provider, email) so each Google account gets its own row.
   const [existingMaster] = await db
     .select()
     .from(schema.integrations)
@@ -131,6 +131,7 @@ export async function upsertGoogleConnection(
       and(
         eq(schema.integrations.userId, userId),
         eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
+        eq(schema.integrations.detail, email),
       ),
     );
   let finalTokens: Credentials = { ...tokens };
@@ -225,9 +226,26 @@ async function persistRefreshedCreds(
     );
 }
 
+async function makeAuthedClient(
+  userId: string,
+  row: typeof schema.integrations.$inferSelect,
+): Promise<{ client: OAuth2Client; masterId: string; email: string }> {
+  const client = await makeOAuth2Client(userId);
+  const creds = JSON.parse(decrypt(row.accessTokenEncrypted!)) as Credentials;
+  client.setCredentials(creds);
+  client.on("tokens", (next) => {
+    const merged: Credentials = { ...creds, ...next };
+    if (!next.refresh_token && creds.refresh_token) merged.refresh_token = creds.refresh_token;
+    void persistRefreshedCreds(userId, row.id, merged).catch((err) => {
+      console.error("google token persist failed", err);
+    });
+  });
+  return { client, masterId: row.id, email: row.detail ?? "" };
+}
+
 export async function getAuthedClient(
   userId: string,
-): Promise<{ client: OAuth2Client; masterId: string } | null> {
+): Promise<{ client: OAuth2Client; masterId: string; email: string } | null> {
   const [row] = await db
     .select()
     .from(schema.integrations)
@@ -239,20 +257,25 @@ export async function getAuthedClient(
       ),
     );
   if (!row || !row.accessTokenEncrypted) return null;
+  return makeAuthedClient(userId, row);
+}
 
-  const client = await makeOAuth2Client(userId);
-  const creds = JSON.parse(decrypt(row.accessTokenEncrypted)) as Credentials;
-  client.setCredentials(creds);
-
-  client.on("tokens", (next) => {
-    const merged: Credentials = { ...creds, ...next };
-    if (!next.refresh_token && creds.refresh_token) merged.refresh_token = creds.refresh_token;
-    void persistRefreshedCreds(userId, row.id, merged).catch((err) => {
-      console.error("google token persist failed", err);
-    });
-  });
-
-  return { client, masterId: row.id };
+export async function getAllAuthedClients(
+  userId: string,
+): Promise<{ client: OAuth2Client; masterId: string; email: string }[]> {
+  const rows = await db
+    .select()
+    .from(schema.integrations)
+    .where(
+      and(
+        eq(schema.integrations.userId, userId),
+        eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
+        eq(schema.integrations.status, "connected"),
+      ),
+    );
+  return Promise.all(
+    rows.filter((r) => r.accessTokenEncrypted).map((r) => makeAuthedClient(userId, r)),
+  );
 }
 
 export async function isFeatureEnabled(
@@ -272,42 +295,66 @@ export async function isFeatureEnabled(
   return !!row;
 }
 
-export async function disconnectGoogle(userId: string): Promise<void> {
-  const [master] = await db
+export async function disconnectGoogle(userId: string, masterId?: string): Promise<void> {
+  // Resolve which master rows to disconnect.
+  const mastersToRevoke = masterId
+    ? await db
+        .select()
+        .from(schema.integrations)
+        .where(
+          and(
+            eq(schema.integrations.userId, userId),
+            eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
+            eq(schema.integrations.id, masterId),
+          ),
+        )
+    : await db
+        .select()
+        .from(schema.integrations)
+        .where(
+          and(
+            eq(schema.integrations.userId, userId),
+            eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
+          ),
+        );
+
+  for (const master of mastersToRevoke) {
+    if (master.accessTokenEncrypted) {
+      try {
+        const client = await makeOAuth2Client(userId);
+        const creds = JSON.parse(decrypt(master.accessTokenEncrypted)) as Credentials;
+        client.setCredentials(creds);
+        await client.revokeCredentials();
+      } catch (err) {
+        console.warn("google revoke failed", err);
+      }
+    }
+    await db
+      .update(schema.integrations)
+      .set({ status: "disconnected", accessTokenEncrypted: null, refreshTokenEncrypted: null })
+      .where(eq(schema.integrations.id, master.id));
+  }
+
+  // Disable feature rows only if no connected masters remain.
+  const [remaining] = await db
     .select()
     .from(schema.integrations)
     .where(
       and(
         eq(schema.integrations.userId, userId),
         eq(schema.integrations.provider, GOOGLE_MASTER_PROVIDER),
+        eq(schema.integrations.status, "connected"),
       ),
     );
-  if (master?.accessTokenEncrypted) {
-    try {
-      const client = await makeOAuth2Client(userId);
-      const creds = JSON.parse(decrypt(master.accessTokenEncrypted)) as Credentials;
-      client.setCredentials(creds);
-      await client.revokeCredentials();
-    } catch (err) {
-      console.warn("google revoke failed", err);
-    }
+  if (!remaining) {
+    await db
+      .update(schema.integrations)
+      .set({ status: "disconnected", accessTokenEncrypted: null, refreshTokenEncrypted: null })
+      .where(
+        and(
+          eq(schema.integrations.userId, userId),
+          inArray(schema.integrations.provider, [...GOOGLE_FEATURE_PROVIDERS]),
+        ),
+      );
   }
-
-  // Clear master tokens, turn everything off.
-  await db
-    .update(schema.integrations)
-    .set({
-      status: "disconnected",
-      accessTokenEncrypted: null,
-      refreshTokenEncrypted: null,
-    })
-    .where(
-      and(
-        eq(schema.integrations.userId, userId),
-        inArray(schema.integrations.provider, [
-          GOOGLE_MASTER_PROVIDER,
-          ...GOOGLE_FEATURE_PROVIDERS,
-        ]),
-      ),
-    );
 }

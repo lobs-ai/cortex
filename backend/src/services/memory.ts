@@ -1,5 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
+import { newId } from "../lib/ids.js";
 
 export async function listPreferences(userId: string) {
   const rows = await db
@@ -13,6 +14,59 @@ export async function listPreferences(userId: string) {
     source: r.source,
     confidence: r.confidence,
   }));
+}
+
+export async function recordPreference(
+  userId: string,
+  input: { key: string; value: unknown; source?: string; confidence?: number },
+) {
+  const key = input.key.trim();
+  if (!key) throw new Error("preference key is required");
+  // Reserved namespace for LLM role/model configuration — not agent-writable.
+  if (key.startsWith("llm.role.")) {
+    throw new Error(`preference key "${key}" is reserved`);
+  }
+
+  const now = new Date();
+  const valueJson = JSON.stringify(input.value ?? null);
+  const source = input.source ?? "agent";
+  const confidence = clamp01(input.confidence ?? 0.8);
+
+  const [existing] = await db
+    .select()
+    .from(schema.preferencesExplicit)
+    .where(
+      and(
+        eq(schema.preferencesExplicit.userId, userId),
+        eq(schema.preferencesExplicit.key, key),
+      ),
+    );
+
+  if (existing) {
+    await db
+      .update(schema.preferencesExplicit)
+      .set({ valueJson, source, confidence, updatedAt: now })
+      .where(eq(schema.preferencesExplicit.id, existing.id));
+    return { id: existing.id, key, value: input.value, source, confidence, updated: true };
+  }
+
+  const id = newId("pr");
+  await db.insert(schema.preferencesExplicit).values({
+    id,
+    userId,
+    key,
+    valueJson,
+    source,
+    confidence,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return { id, key, value: input.value, source, confidence, updated: false };
+}
+
+function clamp01(n: number): number {
+  if (Number.isNaN(n)) return 0.8;
+  return Math.max(0, Math.min(1, n));
 }
 
 export async function listTendencies(userId: string) {

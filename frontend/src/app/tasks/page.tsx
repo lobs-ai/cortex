@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Task } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
@@ -47,6 +47,15 @@ export default function TasksPage() {
   const [newPriority, setNewPriority] = useState<Task["priority"]>("P2");
   const [newStatus, setNewStatus] = useState<Task["status"]>("inbox");
   const titleRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!showCreate) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowCreate(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showCreate]);
 
   function openCreate(defaultStatus: Task["status"] = "inbox") {
     setNewStatus(defaultStatus);

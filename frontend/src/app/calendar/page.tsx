@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Event } from "@/lib/api";
+import { api, type Event, type JournalEntry } from "@/lib/api";
 import { fmtHM, fmtDateShort, fmtWeekday } from "@/lib/format";
 import { Icon } from "@/components/Icon";
+import { Markdown } from "@/components/Markdown";
 
 type View = "day" | "week" | "month";
 
@@ -24,6 +25,7 @@ export default function CalendarPage() {
   });
   const [offset, setOffset] = useState(0); // days from today
   const [showCreate, setShowCreate] = useState(false);
+  const [selected, setSelected] = useState<Event | null>(null);
 
   const navigate = (dir: 1 | -1) => {
     if (view === "day") {
@@ -62,6 +64,19 @@ export default function CalendarPage() {
     queryFn: () => api.events.list(rangeFrom, rangeTo),
   });
 
+  const { data: journal = [] } = useQuery({
+    queryKey: ["journal", "reflection", rangeFrom.toISOString(), rangeTo.toISOString()],
+    queryFn: () => api.journal.list({ kind: "reflection", from: rangeFrom, to: rangeTo, limit: 200 }),
+  });
+
+  const reflectionsByEvent = useMemo(() => {
+    const m = new Map<string, JournalEntry>();
+    for (const j of journal) {
+      if (j.eventId && j.kind === "reflection") m.set(j.eventId, j);
+    }
+    return m;
+  }, [journal]);
+
   const rsvp = useMutation({
     mutationFn: ({ id, response }: { id: string; response: "accepted" | "declined" | "tentative" }) =>
       api.events.rsvp(id, response),
@@ -79,15 +94,49 @@ export default function CalendarPage() {
     },
   });
 
+  const deleteEvent = useMutation({
+    mutationFn: (id: string) => api.events.remove(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["events"] });
+      setSelected(null);
+    },
+  });
+
+  const rescheduleEvent = useMutation({
+    mutationFn: ({ id, start, end }: { id: string; start: Date; end: Date }) =>
+      api.events.patch(id, { startTime: start, endTime: end }),
+    onSuccess: (updated) => {
+      qc.invalidateQueries({ queryKey: ["events"] });
+      setSelected(updated);
+    },
+  });
+
   const eventsByDay = useMemo(() => {
     const m = new Map<number, Event[]>();
     for (const e of events) {
-      const s = new Date(e.start);
-      s.setHours(0, 0, 0, 0);
-      const key = +s;
-      const arr = m.get(key) ?? [];
-      arr.push(e);
-      m.set(key, arr);
+      if (isAllDay(e)) {
+        const startKey = allDayLocalKey(new Date(e.start));
+        let endKey = allDayLocalKey(new Date(e.end));
+        // A 0-duration "date marker" still occupies one day on the calendar.
+        if (endKey <= startKey) {
+          const d = new Date(startKey);
+          d.setDate(d.getDate() + 1);
+          endKey = +d;
+        }
+        for (const d = new Date(startKey); +d < endKey; d.setDate(d.getDate() + 1)) {
+          const key = +d;
+          const arr = m.get(key) ?? [];
+          arr.push(e);
+          m.set(key, arr);
+        }
+      } else {
+        const s = new Date(e.start);
+        s.setHours(0, 0, 0, 0);
+        const key = +s;
+        const arr = m.get(key) ?? [];
+        arr.push(e);
+        m.set(key, arr);
+      }
     }
     return m;
   }, [events]);
@@ -132,11 +181,15 @@ export default function CalendarPage() {
         />
       )}
 
-      {view === "day" && <DayGrid today={today} eventsByDay={eventsByDay} offset={offset} />}
-      {view === "week" && (
-        <WeekGrid today={today} eventsByDay={eventsByDay} offset={offset} />
+      {view === "day" && (
+        <DayGrid today={today} eventsByDay={eventsByDay} offset={offset} onSelect={setSelected} reflections={reflectionsByEvent} />
       )}
-      {view === "month" && <MonthView today={today} eventsByDay={eventsByDay} offset={offset} />}
+      {view === "week" && (
+        <WeekGrid today={today} eventsByDay={eventsByDay} offset={offset} onSelect={setSelected} reflections={reflectionsByEvent} />
+      )}
+      {view === "month" && (
+        <MonthView today={today} eventsByDay={eventsByDay} offset={offset} onSelect={setSelected} reflections={reflectionsByEvent} />
+      )}
 
       {showCreate && (
         <NewEventModal
@@ -144,6 +197,19 @@ export default function CalendarPage() {
           onClose={() => setShowCreate(false)}
           onSubmit={(v) => createEvent.mutate(v)}
           pending={createEvent.isPending}
+        />
+      )}
+
+      {selected && (
+        <EventActionsModal
+          event={selected}
+          reflection={reflectionsByEvent.get(selected.id) ?? null}
+          onClose={() => setSelected(null)}
+          onDelete={() => deleteEvent.mutate(selected.id)}
+          onReschedule={(start, end) => rescheduleEvent.mutate({ id: selected.id, start, end })}
+          rescheduling={rescheduleEvent.isPending}
+          rescheduleError={rescheduleEvent.error instanceof Error ? rescheduleEvent.error.message : null}
+          busy={deleteEvent.isPending}
         />
       )}
     </div>
@@ -215,53 +281,206 @@ function PendingInvitesStrip({
 function eventStyle(e: Event, base: Date) {
   const s = new Date(e.start);
   const t = new Date(e.end);
-  const startMin = (+s - +base) / 60000;
-  const endMin = (+t - +base) / 60000;
+  const startMin = Math.max(0, (+s - +base) / 60000);
+  const endMin = Math.min(24 * 60, (+t - +base) / 60000);
   const top = (startMin / 60) * HOUR_PX;
   const height = Math.max(20, ((endMin - startMin) / 60) * HOUR_PX);
   return { top, height };
+}
+
+// Pick the local-midnight day key for an all-day boundary timestamp. When the
+// server and client share a timezone the event is stored at local midnight. When
+// the server is UTC the event arrives as UTC-midnight and we should key by the
+// UTC date (the nominal calendar date the event was created for), not the local
+// date of the moment which may fall on the previous day.
+function allDayLocalKey(d: Date): number {
+  if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0) {
+    return +new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  }
+  const local = new Date(d);
+  local.setHours(0, 0, 0, 0);
+  return +local;
+}
+
+function isAllDay(ev: Event): boolean {
+  const s = new Date(ev.start);
+  const e = new Date(ev.end);
+  const duration = +e - +s;
+  if (duration < 0) return false;
+  // Whole-day events land on midnight boundaries. Check both local and UTC so
+  // we catch events serialized by a backend whose timezone differs from the
+  // browser (e.g. backend in UTC, client in Detroit — events arrive at
+  // "HH:00" where HH = the tz offset).
+  const atLocalMidnight =
+    s.getHours() === 0 &&
+    s.getMinutes() === 0 &&
+    s.getSeconds() === 0 &&
+    e.getHours() === 0 &&
+    e.getMinutes() === 0 &&
+    e.getSeconds() === 0;
+  const atUtcMidnight =
+    s.getUTCHours() === 0 &&
+    s.getUTCMinutes() === 0 &&
+    s.getUTCSeconds() === 0 &&
+    e.getUTCHours() === 0 &&
+    e.getUTCMinutes() === 0 &&
+    e.getUTCSeconds() === 0;
+  // Duration of 0 covers Google "date-only" markers (e.g. "Classes end")
+  // where the sync collapsed start and end to the same midnight instant.
+  const wholeDays = duration === 0 || duration % 86_400_000 === 0;
+  return wholeDays && (atLocalMidnight || atUtcMidnight);
+}
+
+type Positioned = { ev: Event; col: number; cols: number };
+
+// Greedy column packing for overlapping events. Groups transitively-overlapping
+// events, assigns each to the lowest-index column whose last event has ended,
+// and gives every event in the group the same total column count so widths align.
+function layoutColumns(events: Event[]): Positioned[] {
+  if (events.length === 0) return [];
+  const sorted = [...events].sort((a, b) => {
+    const as = +new Date(a.start);
+    const bs = +new Date(b.start);
+    if (as !== bs) return as - bs;
+    return +new Date(a.end) - +new Date(b.end);
+  });
+
+  type Item = { ev: Event; col: number; end: number };
+  const groups: Item[][] = [];
+  let cur: Item[] = [];
+  let curMaxEnd = 0;
+
+  for (const ev of sorted) {
+    const s = +new Date(ev.start);
+    const e = +new Date(ev.end);
+    if (cur.length > 0 && s < curMaxEnd) {
+      let col = 0;
+      while (cur.some((x) => x.col === col && x.end > s)) col++;
+      cur.push({ ev, col, end: e });
+      if (e > curMaxEnd) curMaxEnd = e;
+    } else {
+      if (cur.length) groups.push(cur);
+      cur = [{ ev, col: 0, end: e }];
+      curMaxEnd = e;
+    }
+  }
+  if (cur.length) groups.push(cur);
+
+  const out: Positioned[] = [];
+  for (const g of groups) {
+    const cols = Math.max(...g.map((x) => x.col)) + 1;
+    for (const item of g) out.push({ ev: item.ev, col: item.col, cols });
+  }
+  return out;
 }
 
 function DayColumn({
   date,
   events,
   isToday,
+  onSelect,
+  reflections,
 }: {
   date: Date;
   events: Event[];
   isToday: boolean;
+  onSelect?: (ev: Event) => void;
+  reflections?: Map<string, JournalEntry>;
 }) {
-  const now = new Date();
+  const now = useNow();
   const nowMin = now.getHours() * 60 + now.getMinutes();
   const nowTop = (nowMin / 60) * HOUR_PX;
 
+  const positioned = useMemo(
+    () => layoutColumns(events.filter((e) => !isAllDay(e))),
+    [events],
+  );
+
   return (
     <div className="day-col" style={{ position: "relative", height: GRID_HEIGHT }}>
-      {events.map((ev) => {
+      {positioned.map(({ ev, col, cols }) => {
         const { top, height } = eventStyle(ev, date);
         const pending = ev.rsvpStatus === "needsAction";
+        const ended = new Date(ev.end) < now;
+        const reflection = reflections?.get(ev.id);
+        const widthPct = 100 / cols;
+        const positionStyle: React.CSSProperties =
+          cols === 1
+            ? {}
+            : {
+                left: `calc(${col * widthPct}% + 2px)`,
+                right: "auto",
+                width: `calc(${widthPct}% - 4px)`,
+              };
         return (
-          <div
+          <button
             key={ev.id}
-            className={`evt ${ev.kind}`}
+            type="button"
+            onClick={() => onSelect?.(ev)}
+            className={`evt clickable ${ev.kind}`}
             style={{
               top,
               height,
+              ...positionStyle,
               ...(pending ? { borderStyle: "dashed", opacity: 0.8 } : {}),
             }}
           >
-            <div className="t truncate">{ev.title}</div>
+            <div className="t truncate">
+              {ev.title}
+              {reflection && <ReflectionBadge rating={reflection.rating} />}
+              {!reflection && ended && !pending && <ReflectUnratedBadge />}
+            </div>
             <div className="m">
               {fmtHM(new Date(ev.start))}–{fmtHM(new Date(ev.end))}
               {ev.location ? " · " + ev.location : ""}
               {pending ? " · pending" : ""}
             </div>
-          </div>
+          </button>
         );
       })}
       {isToday && nowTop > 0 && nowTop < GRID_HEIGHT && (
         <div className="evt now-line" style={{ top: nowTop }} />
       )}
+    </div>
+  );
+}
+
+function AllDayStrip({
+  days,
+  eventsByDay,
+  onSelect,
+}: {
+  days: Date[];
+  eventsByDay: Map<number, Event[]>;
+  onSelect?: (ev: Event) => void;
+}) {
+  const perDay = days.map((d) => (eventsByDay.get(+d) ?? []).filter(isAllDay));
+  if (perDay.every((list) => list.length === 0)) return null;
+  return (
+    <div
+      className="all-day-row"
+      style={{ gridTemplateColumns: `48px repeat(${days.length}, 1fr)` }}
+    >
+      <div className="all-day-label caps muted">all day</div>
+      {days.map((d, i) => (
+        <div key={+d} className="all-day-col">
+          {perDay[i].map((ev) => {
+            const pending = ev.rsvpStatus === "needsAction";
+            return (
+              <button
+                key={ev.id}
+                type="button"
+                onClick={() => onSelect?.(ev)}
+                className={`all-day-evt clickable ${ev.kind}`}
+                style={pending ? { borderStyle: "dashed", opacity: 0.8 } : undefined}
+                title={ev.title}
+              >
+                {ev.title}
+              </button>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -278,6 +497,25 @@ function HourColumn() {
   );
 }
 
+// Re-render every minute so the now-line and "ended" checks stay fresh without
+// requiring a page refresh. Aligns the tick to the next minute boundary.
+function useNow() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const msToNextMinute = 60000 - (Date.now() % 60000);
+    const timeout = setTimeout(() => {
+      setNow(new Date());
+      interval = setInterval(() => setNow(new Date()), 60000);
+    }, msToNextMinute);
+    return () => {
+      clearTimeout(timeout);
+      if (interval) clearInterval(interval);
+    };
+  }, []);
+  return now;
+}
+
 // Scroll the grid so that current hour is ~25% from the top on first paint.
 function useAutoScrollToNow(ref: React.RefObject<HTMLElement>) {
   useEffect(() => {
@@ -292,10 +530,14 @@ function DayGrid({
   today,
   eventsByDay,
   offset,
+  onSelect,
+  reflections,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
   offset: number;
+  onSelect?: (ev: Event) => void;
+  reflections?: Map<string, JournalEntry>;
 }) {
   const date = useMemo(() => {
     const d = new Date(today);
@@ -306,10 +548,24 @@ function DayGrid({
   const scrollRef = useRef<HTMLDivElement>(null);
   useAutoScrollToNow(scrollRef);
 
+  const isToday = +date === +today;
   return (
-    <div className="day-grid" ref={scrollRef}>
-      <HourColumn />
-      <DayColumn date={date} events={events} isToday={offset === 0} />
+    <div className="col" style={{ minHeight: 0, overflow: "hidden" }}>
+      <div
+        className="week-hd"
+        style={{ gridTemplateColumns: "48px 1fr" }}
+      >
+        <div />
+        <div className={isToday ? "today" : ""}>
+          <div className="caps">{fmtWeekday(date)}</div>
+          <div className="num">{date.getDate()}</div>
+        </div>
+      </div>
+      <AllDayStrip days={[date]} eventsByDay={eventsByDay} onSelect={onSelect} />
+      <div className="day-grid" ref={scrollRef}>
+        <HourColumn />
+        <DayColumn date={date} events={events} isToday={isToday} onSelect={onSelect} reflections={reflections} />
+      </div>
     </div>
   );
 }
@@ -318,10 +574,14 @@ function WeekGrid({
   today,
   eventsByDay,
   offset,
+  onSelect,
+  reflections,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
   offset: number;
+  onSelect?: (ev: Event) => void;
+  reflections?: Map<string, JournalEntry>;
 }) {
   const days = useMemo(() => {
     const ref = new Date(today);
@@ -352,6 +612,7 @@ function WeekGrid({
           );
         })}
       </div>
+      <AllDayStrip days={days} eventsByDay={eventsByDay} onSelect={onSelect} />
       <div className="week-grid" ref={scrollRef}>
         <HourColumn />
         {days.map((d, i) => (
@@ -360,6 +621,8 @@ function WeekGrid({
             date={d}
             events={eventsByDay.get(+d) ?? []}
             isToday={+d === +today}
+            onSelect={onSelect}
+            reflections={reflections}
           />
         ))}
       </div>
@@ -371,10 +634,14 @@ function MonthView({
   today,
   eventsByDay,
   offset,
+  onSelect,
+  reflections,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
   offset: number;
+  onSelect?: (ev: Event) => void;
+  reflections?: Map<string, JournalEntry>;
 }) {
   const displayDate = useMemo(() => {
     const d = new Date(today);
@@ -423,15 +690,22 @@ function MonthView({
               className={`month-cell ${isToday ? "today" : ""} ${isOther ? "other" : ""}`}
             >
               <div className="n">{cell.getDate()}</div>
-              {cellEvents.slice(0, 3).map((ev) => (
-                <div
-                  key={ev.id}
-                  className="month-evt"
-                  style={{ borderColor: kindToCss(ev.kind) }}
-                >
-                  {fmtHM(new Date(ev.start))} {ev.title}
-                </div>
-              ))}
+              {cellEvents.slice(0, 3).map((ev) => {
+                const reflection = reflections?.get(ev.id);
+                const allDay = isAllDay(ev);
+                return (
+                  <button
+                    key={ev.id}
+                    type="button"
+                    onClick={() => onSelect?.(ev)}
+                    className="month-evt clickable"
+                    style={{ borderColor: kindToCss(ev.kind) }}
+                  >
+                    {allDay ? ev.title : `${fmtHM(new Date(ev.start))} ${ev.title}`}
+                    {reflection && <ReflectionBadge rating={reflection.rating} />}
+                  </button>
+                );
+              })}
               {cellEvents.length > 3 && (
                 <div className="muted-2" style={{ fontSize: 10 }}>
                   +{cellEvents.length - 3} more
@@ -442,6 +716,39 @@ function MonthView({
         })}
       </div>
     </div>
+  );
+}
+
+function ReflectionBadge({ rating }: { rating: number | null }) {
+  const label = rating == null ? "note" : `${"★".repeat(rating)}${"☆".repeat(5 - rating)}`;
+  const tone =
+    rating == null
+      ? "var(--muted)"
+      : rating >= 4
+        ? "var(--green)"
+        : rating >= 3
+          ? "var(--amber)"
+          : "var(--red)";
+  return (
+    <span
+      className="reflection-badge"
+      title={rating == null ? "Reflection note" : `Rated ${rating}/5`}
+      style={{ color: tone, borderColor: tone }}
+    >
+      {label}
+    </span>
+  );
+}
+
+function ReflectUnratedBadge() {
+  return (
+    <span
+      className="reflection-badge prompt"
+      title="Tap to reflect on how this went"
+      style={{ color: "var(--muted)", borderColor: "var(--hair-2)" }}
+    >
+      how&apos;d it go?
+    </span>
   );
 }
 
@@ -488,6 +795,14 @@ function NewEventModal({
     d.setHours(d.getHours() + 2);
     return toLocalInputValue(d);
   }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const [title, setTitle] = useState("");
   const [location, setLocation] = useState("");
@@ -634,4 +949,349 @@ function NewEventModal({
 function toLocalInputValue(d: Date) {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function EventActionsModal({
+  event,
+  reflection,
+  onClose,
+  onDelete,
+  onReschedule,
+  rescheduling,
+  rescheduleError,
+  busy,
+}: {
+  event: Event;
+  reflection: JournalEntry | null;
+  onClose: () => void;
+  onDelete: () => void;
+  onReschedule: (start: Date, end: Date) => void;
+  rescheduling: boolean;
+  rescheduleError: string | null;
+  busy: boolean;
+}) {
+  const qc = useQueryClient();
+  const ended = new Date(event.end) < new Date();
+  const [mode, setMode] = useState<"menu" | "reschedule" | "ask" | "confirmDelete" | "reflect">(
+    () => (ended && !reflection ? "reflect" : "menu"),
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const [reflectRating, setReflectRating] = useState<number | null>(reflection?.rating ?? null);
+  const [reflectNote, setReflectNote] = useState(reflection?.note ?? "");
+  const saveReflection = useMutation({
+    mutationFn: async () => {
+      if (reflection) {
+        return api.journal.patch(reflection.id, { rating: reflectRating, note: reflectNote });
+      }
+      return api.journal.create({
+        kind: "reflection",
+        eventId: event.id,
+        rating: reflectRating,
+        note: reflectNote,
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["journal"] });
+      setMode("menu");
+    },
+  });
+  const removeReflection = useMutation({
+    mutationFn: async () => {
+      if (!reflection) return;
+      await api.journal.remove(reflection.id);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["journal"] });
+      setReflectRating(null);
+      setReflectNote("");
+      setMode("menu");
+    },
+  });
+  const [start, setStart] = useState(() => toLocalInputValue(new Date(event.start)));
+  const [end, setEnd] = useState(() => toLocalInputValue(new Date(event.end)));
+  const [askReply, setAskReply] = useState<string | null>(null);
+  const [askError, setAskError] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+
+  // Keep the datetime inputs in sync with the event after a successful reschedule.
+  useEffect(() => {
+    setStart(toLocalInputValue(new Date(event.start)));
+    setEnd(toLocalInputValue(new Date(event.end)));
+  }, [event.start, event.end]);
+
+  const inputStyle: React.CSSProperties = {
+    border: "1px solid var(--hair-2)",
+    padding: "6px 8px",
+    background: "var(--bg)",
+    fontSize: 12,
+  };
+
+  const askAgent = async () => {
+    setMode("ask");
+    setAskReply(null);
+    setAskError(null);
+    setAsking(true);
+    const when = `${fmtDateShort(new Date(event.start))} ${fmtHM(new Date(event.start))}–${fmtHM(new Date(event.end))}`;
+    const prompt = `Suggest a better time for my event "${event.title}" (currently ${when}). Consider my existing commitments. Reply with 1–3 specific time options, each on its own line in the format "YYYY-MM-DD HH:MM–HH:MM — rationale". Do not modify anything.`;
+    try {
+      const res = await api.chat.send(prompt);
+      setAskReply(res.message.content);
+    } catch (err) {
+      setAskError(err instanceof Error ? err.message : "Request failed");
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  const disabled = busy || rescheduling || asking;
+
+  return (
+    <div
+      role="dialog"
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,.5)",
+        display: "grid",
+        placeItems: "center",
+        zIndex: 200,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="panel"
+        style={{ width: 460, maxWidth: "92vw", background: "var(--panel)" }}
+      >
+        <div className="panel-hd">
+          <span className="title truncate" style={{ minWidth: 0 }}>
+            <b>{event.title}</b>
+          </span>
+          <button className="btn ghost" onClick={onClose} disabled={disabled}>
+            <Icon name="x" size={12} />
+          </button>
+        </div>
+        <div className="panel-bd" style={{ display: "grid", gap: 10 }}>
+          <div className="mono muted" style={{ fontSize: 11.5 }}>
+            {fmtDateShort(new Date(event.start))} · {fmtHM(new Date(event.start))}–
+            {fmtHM(new Date(event.end))}
+            {event.location ? ` · ${event.location}` : ""}
+          </div>
+
+          {mode === "menu" && (
+            <div className="col" style={{ gap: 6 }}>
+              {ended && (
+                <button className="btn" onClick={() => setMode("reflect")} disabled={disabled}>
+                  {reflection ? "Edit reflection" : "How'd it go?"}
+                </button>
+              )}
+              <button className="btn" onClick={askAgent} disabled={disabled}>
+                Ask Cortex to suggest a new time
+              </button>
+              <button className="btn" onClick={() => setMode("reschedule")} disabled={disabled}>
+                Reschedule…
+              </button>
+              <button
+                className="btn"
+                style={{ color: "var(--red)", borderColor: "var(--red)" }}
+                onClick={() => setMode("confirmDelete")}
+                disabled={disabled}
+              >
+                Delete event
+              </button>
+            </div>
+          )}
+
+          {mode === "reflect" && (
+            <>
+              <div className="caps" style={{ fontSize: 10 }}>How&apos;d it go?</div>
+              <div className="row gap-2" style={{ alignItems: "center" }}>
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className="btn"
+                    data-active={reflectRating === n}
+                    onClick={() => setReflectRating(reflectRating === n ? null : n)}
+                    style={{
+                      width: 32,
+                      justifyContent: "center",
+                      padding: 0,
+                      fontSize: 14,
+                      ...(reflectRating === n
+                        ? {
+                            background: "var(--text)",
+                            color: "var(--bg)",
+                            borderColor: "var(--text)",
+                          }
+                        : {}),
+                    }}
+                    title={`${n}/5`}
+                  >
+                    {n}
+                  </button>
+                ))}
+                <span className="muted mono" style={{ fontSize: 10.5, marginLeft: 6 }}>
+                  {reflectRating == null
+                    ? "no rating"
+                    : reflectRating <= 2
+                      ? "rough"
+                      : reflectRating === 3
+                        ? "fine"
+                        : "great"}
+                </span>
+              </div>
+              <textarea
+                placeholder="What happened, how did it feel, what next?"
+                value={reflectNote}
+                onChange={(e) => setReflectNote(e.target.value)}
+                rows={4}
+                className="mono"
+                style={{
+                  border: "1px solid var(--hair-2)",
+                  padding: "6px 8px",
+                  background: "var(--bg)",
+                  fontSize: 12,
+                  resize: "vertical",
+                }}
+              />
+              {saveReflection.error instanceof Error && (
+                <div style={{ color: "var(--red)", fontSize: 11.5 }}>{saveReflection.error.message}</div>
+              )}
+              <div className="row gap-2" style={{ justifyContent: "space-between" }}>
+                <div className="row gap-2">
+                  {reflection && (
+                    <button
+                      className="btn"
+                      style={{ color: "var(--red)", borderColor: "color-mix(in oklch, var(--red), transparent 70%)" }}
+                      disabled={disabled || removeReflection.isPending}
+                      onClick={() => removeReflection.mutate()}
+                    >
+                      {removeReflection.isPending ? "Removing…" : "Remove"}
+                    </button>
+                  )}
+                </div>
+                <div className="row gap-2">
+                  <button className="btn ghost" onClick={() => setMode("menu")} disabled={disabled}>
+                    Back
+                  </button>
+                  <button
+                    className="btn primary"
+                    disabled={disabled || saveReflection.isPending || (reflectRating == null && !reflectNote.trim())}
+                    onClick={() => saveReflection.mutate()}
+                  >
+                    {saveReflection.isPending ? "Saving…" : reflection ? "Save" : "Log reflection"}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {mode === "reschedule" && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <label className="col" style={{ gap: 4 }}>
+                  <span className="caps">Start</span>
+                  <input
+                    type="datetime-local"
+                    className="mono"
+                    style={inputStyle}
+                    value={start}
+                    onChange={(e) => setStart(e.target.value)}
+                  />
+                </label>
+                <label className="col" style={{ gap: 4 }}>
+                  <span className="caps">End</span>
+                  <input
+                    type="datetime-local"
+                    className="mono"
+                    style={inputStyle}
+                    value={end}
+                    onChange={(e) => setEnd(e.target.value)}
+                  />
+                </label>
+              </div>
+              {rescheduleError && (
+                <div style={{ color: "var(--red)", fontSize: 11.5 }}>{rescheduleError}</div>
+              )}
+              <div className="row gap-2" style={{ justifyContent: "flex-end" }}>
+                <button className="btn ghost" onClick={() => setMode("menu")} disabled={disabled}>
+                  Back
+                </button>
+                <button
+                  className="btn primary"
+                  disabled={disabled || !start || !end || new Date(end) <= new Date(start)}
+                  onClick={() => onReschedule(new Date(start), new Date(end))}
+                >
+                  {rescheduling ? "Moving…" : "Move event"}
+                </button>
+              </div>
+            </>
+          )}
+
+          {mode === "ask" && (
+            <>
+              <div
+                style={{
+                  border: "1px solid var(--hair)",
+                  background: "var(--bg)",
+                  padding: "8px 10px",
+                  fontSize: 12,
+                  minHeight: 80,
+                  maxHeight: 260,
+                  overflow: "auto",
+                }}
+              >
+                {asking && <span className="muted">Cortex is thinking…</span>}
+                {!asking && askError && (
+                  <span style={{ color: "var(--red)" }}>{askError}</span>
+                )}
+                {!asking && !askError && askReply && <Markdown>{askReply}</Markdown>}
+              </div>
+              <div className="row gap-2" style={{ justifyContent: "flex-end" }}>
+                <button className="btn ghost" onClick={() => setMode("menu")} disabled={disabled}>
+                  Back
+                </button>
+                <button
+                  className="btn"
+                  disabled={disabled || !askReply}
+                  onClick={() => setMode("reschedule")}
+                >
+                  Reschedule…
+                </button>
+              </div>
+            </>
+          )}
+
+          {mode === "confirmDelete" && (
+            <>
+              <div style={{ fontSize: 12 }}>
+                Delete this event? This cannot be undone.
+              </div>
+              <div className="row gap-2" style={{ justifyContent: "flex-end" }}>
+                <button className="btn ghost" onClick={() => setMode("menu")} disabled={disabled}>
+                  Cancel
+                </button>
+                <button
+                  className="btn"
+                  style={{ color: "var(--red)", borderColor: "var(--red)" }}
+                  disabled={disabled}
+                  onClick={onDelete}
+                >
+                  {busy ? "Deleting…" : "Delete"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }

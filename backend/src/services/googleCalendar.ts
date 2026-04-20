@@ -2,8 +2,8 @@ import { google } from "googleapis";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
-import { getAuthedClient, isFeatureEnabled } from "./googleAuth.js";
-import { getConfigField } from "./integrationConfigs.js";
+import { getAllAuthedClients, getAuthedClient, isFeatureEnabled } from "./googleAuth.js";
+import { getConfigField, setConfig } from "./integrationConfigs.js";
 
 const GOOGLE_CALENDAR_PROVIDER = "google_calendar";
 
@@ -34,7 +34,13 @@ function parseWhen(
   return null;
 }
 
-type SyncStats = { inserted: number; updated: number; cancelled: number };
+type SyncStats = { inserted: number; updated: number; cancelled: number; todayTouched: boolean };
+
+function inRange(d: Date | null | undefined, from: Date, to: Date): boolean {
+  if (!d) return false;
+  const t = +d;
+  return t >= +from && t < +to;
+}
 
 async function syncOneCalendar(
   userId: string,
@@ -42,6 +48,8 @@ async function syncOneCalendar(
   cal: ReturnType<typeof google.calendar>,
   from: Date,
   to: Date,
+  todayStart: Date,
+  todayEnd: Date,
 ): Promise<SyncStats> {
   const res = await cal.events.list({
     calendarId,
@@ -55,6 +63,7 @@ async function syncOneCalendar(
 
   const items: GEvent[] = (res.data.items as GEvent[] | undefined) ?? [];
   let inserted = 0, updated = 0, cancelled = 0;
+  let todayTouched = false;
   const now = new Date();
 
   for (const g of items) {
@@ -80,8 +89,18 @@ async function syncOneCalendar(
     const tz = g.start?.timeZone ?? "America/Detroit";
     const selfAttendee = g.attendees?.find((a) => a.self);
     const rsvpStatus = selfAttendee?.responseStatus ?? null;
+    // A change "touches today" if either the old or the new start sits inside today.
+    const affectsToday =
+      inRange(existing?.startTime, todayStart, todayEnd) || inRange(start, todayStart, todayEnd);
 
     if (existing) {
+      const changed =
+        existing.title !== (g.summary ?? "(no title)") ||
+        +existing.startTime !== +start ||
+        +existing.endTime !== +end ||
+        existing.status !== status ||
+        existing.rsvpStatus !== rsvpStatus ||
+        existing.location !== (g.location ?? null);
       if (g.status === "cancelled") cancelled++;
       else updated++;
       await db
@@ -99,6 +118,7 @@ async function syncOneCalendar(
           updatedAt: now,
         })
         .where(eq(schema.events.id, existing.id));
+      if (changed && affectsToday) todayTouched = true;
     } else {
       if (g.status === "cancelled") continue;
       inserted++;
@@ -121,10 +141,29 @@ async function syncOneCalendar(
         createdAt: now,
         updatedAt: now,
       });
+      if (affectsToday) todayTouched = true;
     }
   }
 
-  return { inserted, updated, cancelled };
+  return { inserted, updated, cancelled, todayTouched };
+}
+
+type ReadSelection = { calendarId: string; masterId: string };
+
+export async function getReadSelections(userId: string): Promise<ReadSelection[]> {
+  const raw = await getConfigField(userId, "google_calendar", "read_calendar_ids");
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as ReadSelection[];
+  } catch {
+    return [];
+  }
+}
+
+export async function setReadSelections(userId: string, selections: ReadSelection[]): Promise<void> {
+  await setConfig(userId, "google_calendar", {
+    read_calendar_ids: selections.length > 0 ? JSON.stringify(selections) : null,
+  });
 }
 
 export async function syncCalendar(userId: string): Promise<{
@@ -132,40 +171,75 @@ export async function syncCalendar(userId: string): Promise<{
   inserted: number;
   updated: number;
   cancelled: number;
+  todayTouched: boolean;
   range: { from: string; to: string };
 }> {
-  const authed = await getAuthedClient(userId);
-  if (!authed) throw new Error("not_connected");
+  const allAuthed = await getAllAuthedClients(userId);
+  if (allAuthed.length === 0) throw new Error("not_connected");
   if (!(await isFeatureEnabled(userId, "google_calendar"))) {
     throw new Error("feature_disabled");
   }
 
   const from = new Date(Date.now() - WINDOW_PAST_MS);
   const to = new Date(Date.now() + WINDOW_FUTURE_MS);
-  const cal = google.calendar({ version: "v3", auth: authed.client });
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date(todayStart);
+  todayEnd.setDate(todayEnd.getDate() + 1);
+  const clientMap = new Map(allAuthed.map((a) => [a.masterId, a.client]));
 
-  const primary = await syncOneCalendar(userId, "primary", cal, from, to);
+  // Use saved selections; fall back to syncing primary for every account.
+  let readSelections = await getReadSelections(userId);
+  if (readSelections.length === 0) {
+    readSelections = allAuthed.map((a) => ({ calendarId: "primary", masterId: a.masterId }));
+  }
 
-  // Also sync the write calendar if it's configured and not the primary
-  let extra: SyncStats = { inserted: 0, updated: 0, cancelled: 0 };
-  const writeCalId = await getConfigField(userId, "google_calendar", "write_calendar_id");
-  if (writeCalId && writeCalId !== "primary") {
+  let inserted = 0, updated = 0, cancelled = 0;
+  let todayTouched = false;
+  const now = new Date();
+
+  for (const sel of readSelections) {
+    const client = clientMap.get(sel.masterId);
+    if (!client) continue;
+    const cal = google.calendar({ version: "v3", auth: client });
     try {
-      extra = await syncOneCalendar(userId, writeCalId, cal, from, to);
+      const stats = await syncOneCalendar(userId, sel.calendarId, cal, from, to, todayStart, todayEnd);
+      inserted += stats.inserted;
+      updated += stats.updated;
+      cancelled += stats.cancelled;
+      if (stats.todayTouched) todayTouched = true;
     } catch {
-      // Don't fail the overall sync if the write calendar sync fails
+      // skip calendars that error (revoked access, deleted calendar, etc.)
     }
   }
 
-  const inserted = primary.inserted + extra.inserted;
-  const updated = primary.updated + extra.updated;
-  const cancelled = primary.cancelled + extra.cancelled;
-  const now = new Date();
+  // Sync write calendar too if it isn't already in the read selections.
+  const writeCalId = await getConfigField(userId, "google_calendar", "write_calendar_id");
+  if (writeCalId) {
+    const alreadySynced = readSelections.some((s) => s.calendarId === writeCalId);
+    if (!alreadySynced) {
+      for (const authed of allAuthed) {
+        const cal = google.calendar({ version: "v3", auth: authed.client });
+        try {
+          const extra = await syncOneCalendar(userId, writeCalId, cal, from, to, todayStart, todayEnd);
+          inserted += extra.inserted;
+          updated += extra.updated;
+          cancelled += extra.cancelled;
+          if (extra.todayTouched) todayTouched = true;
+          break;
+        } catch {
+          // try next account
+        }
+      }
+    }
+  }
 
-  await db
-    .update(schema.integrations)
-    .set({ lastSyncedAt: now })
-    .where(and(eq(schema.integrations.userId, userId), eq(schema.integrations.id, authed.masterId)));
+  for (const authed of allAuthed) {
+    await db
+      .update(schema.integrations)
+      .set({ lastSyncedAt: now })
+      .where(and(eq(schema.integrations.userId, userId), eq(schema.integrations.id, authed.masterId)));
+  }
   await db
     .update(schema.integrations)
     .set({ lastSyncedAt: now })
@@ -176,26 +250,42 @@ export async function syncCalendar(userId: string): Promise<{
     inserted,
     updated,
     cancelled,
+    todayTouched,
     range: { from: from.toISOString(), to: to.toISOString() },
   };
 }
 
 export async function listCalendars(
   userId: string,
-): Promise<{ id: string; summary: string; primary: boolean }[]> {
-  const authed = await getAuthedClient(userId);
-  if (!authed) throw new Error("not_connected");
+): Promise<{ id: string; summary: string; primary: boolean; masterId: string; accountEmail: string }[]> {
+  const allAuthed = await getAllAuthedClients(userId);
+  if (allAuthed.length === 0) throw new Error("not_connected");
 
-  const cal = google.calendar({ version: "v3", auth: authed.client });
-  const res = await cal.calendarList.list({ maxResults: 100 });
-  const items = (res.data.items ?? []) as Array<{
-    id?: string | null;
-    summary?: string | null;
-    primary?: boolean | null;
-  }>;
-  return items
-    .filter((c): c is typeof c & { id: string } => !!c.id)
-    .map((c) => ({ id: c.id, summary: c.summary ?? c.id, primary: !!c.primary }));
+  const results: { id: string; summary: string; primary: boolean; masterId: string; accountEmail: string }[] = [];
+  for (const authed of allAuthed) {
+    const cal = google.calendar({ version: "v3", auth: authed.client });
+    try {
+      const res = await cal.calendarList.list({ maxResults: 100 });
+      const items = (res.data.items ?? []) as Array<{
+        id?: string | null;
+        summary?: string | null;
+        primary?: boolean | null;
+      }>;
+      for (const c of items) {
+        if (!c.id) continue;
+        results.push({
+          id: c.id,
+          summary: c.summary ?? c.id,
+          primary: !!c.primary,
+          masterId: authed.masterId,
+          accountEmail: authed.email,
+        });
+      }
+    } catch {
+      // skip accounts that can't list calendars
+    }
+  }
+  return results;
 }
 
 export async function pushEventToGoogle(

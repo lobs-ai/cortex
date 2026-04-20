@@ -1,5 +1,44 @@
 import { and, desc, eq, gte, lte } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
+import { newId } from "../lib/ids.js";
+import { generateDailyPlan, type DailyPlan } from "../ai/planner.js";
+
+export async function persistPlan(userId: string, type: "daily" | "weekly", fresh: DailyPlan) {
+  const now = new Date();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(today);
+  end.setDate(end.getDate() + 1);
+  const id = newId("plan");
+  await db.insert(schema.plans).values({
+    id,
+    userId,
+    planType: type,
+    periodStart: today,
+    periodEnd: end,
+    contentJson: JSON.stringify({ ...fresh, generatedAt: now.toISOString() }),
+    generatedBy: fresh.generatedBy,
+    createdAt: now,
+  });
+  return {
+    id,
+    type,
+    periodStart: today,
+    periodEnd: end,
+    content: { ...fresh, generatedAt: now.toISOString() },
+    generatedBy: fresh.generatedBy,
+    createdAt: now,
+  };
+}
+
+export async function regenerateDailyPlan(
+  userId: string,
+  date: Date = new Date(),
+  opts?: { guidance?: string },
+) {
+  const fresh = await generateDailyPlan(userId, date, opts);
+  return persistPlan(userId, "daily", fresh);
+}
 
 export async function getLatestPlan(userId: string, type: "daily" | "weekly") {
   const today = new Date();

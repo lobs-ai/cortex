@@ -4,6 +4,8 @@ import { syncCalendar } from "./services/googleCalendar.js";
 import { db, schema } from "./db/client.js";
 import { newId } from "./lib/ids.js";
 import { CALENDAR_INTERVAL_MS, MONITOR_INTERVAL_MS } from "./lib/schedules.js";
+import { regenerateDailyPlan } from "./services/plans.js";
+import { createNotification, listActiveNotifications } from "./services/notifications.js";
 
 // Minimal background worker. Polls on a timer:
 //   - monitor every 30 min for proactive alerts
@@ -38,6 +40,30 @@ async function monitorTick() {
   }
 }
 
+const PLAN_REFRESH_COOLDOWN_MS = 10 * 60 * 1000;
+
+async function autoRefreshPlan() {
+  try {
+    await regenerateDailyPlan(DEMO_USER_ID);
+    const active = await listActiveNotifications(DEMO_USER_ID);
+    const recent = active.find(
+      (n) => n.kind === "plan_refreshed" && Date.now() - +n.createdAt < PLAN_REFRESH_COOLDOWN_MS,
+    );
+    if (!recent) {
+      await createNotification(DEMO_USER_ID, {
+        severity: "low",
+        kind: "plan_refreshed",
+        title: "Plan refreshed — your calendar changed",
+        body: "Cortex re-planned today based on a calendar update.",
+        category: "info",
+      });
+    }
+    console.log("calendar: today's plan regenerated");
+  } catch (err) {
+    console.error("auto plan regen failed:", err);
+  }
+}
+
 async function calendarTick() {
   try {
     const res = await syncCalendar(DEMO_USER_ID);
@@ -46,6 +72,7 @@ async function calendarTick() {
         `calendar: ${res.inserted} new, ${res.updated} updated, ${res.cancelled} cancelled`,
       );
     }
+    if (res.todayTouched) await autoRefreshPlan();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (

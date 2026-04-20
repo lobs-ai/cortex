@@ -13,7 +13,7 @@ import {
   mintState,
   upsertGoogleConnection,
 } from "../services/googleAuth.js";
-import { listCalendars, syncCalendar } from "../services/googleCalendar.js";
+import { getReadSelections, listCalendars, setReadSelections, syncCalendar } from "../services/googleCalendar.js";
 import {
   clearConfig,
   describeConfig,
@@ -288,6 +288,23 @@ export async function integrationsManageRoutes(app: FastifyInstance) {
     }
   });
 
+  app.get("/api/integrations/google/read-calendars", async (req) => {
+    const u = currentUser(req);
+    const selections = await getReadSelections(u.id);
+    return { selections };
+  });
+
+  app.put("/api/integrations/google/read-calendars", async (req) => {
+    const u = currentUser(req);
+    const { selections } = z
+      .object({
+        selections: z.array(z.object({ calendarId: z.string(), masterId: z.string() })),
+      })
+      .parse(req.body);
+    await setReadSelections(u.id, selections);
+    return { ok: true };
+  });
+
   app.get("/api/integrations/google/write-calendar", async (req) => {
     const u = currentUser(req);
     const cfg = await getConfig(u.id, "google_calendar");
@@ -303,7 +320,8 @@ export async function integrationsManageRoutes(app: FastifyInstance) {
 
   app.post("/api/integrations/google/disconnect", async (req) => {
     const u = currentUser(req);
-    await disconnectGoogle(u.id);
+    const body = z.object({ masterId: z.string().optional() }).optional().parse(req.body);
+    await disconnectGoogle(u.id, body?.masterId);
     return { ok: true };
   });
 
@@ -324,7 +342,9 @@ export async function integrationsManageRoutes(app: FastifyInstance) {
       row.provider === "gmail" ||
       row.provider === "google_drive"
     ) {
-      await disconnectGoogle(u.id);
+      // For master rows, disconnect just that account; for feature rows, disconnect all.
+      const masterId = row.provider === "google" ? row.id : undefined;
+      await disconnectGoogle(u.id, masterId);
     } else {
       await db
         .update(schema.integrations)

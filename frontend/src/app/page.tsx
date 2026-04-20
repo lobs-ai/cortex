@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { api, type Plan } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 import { Dot, PriorityChip, ProjectTag } from "@/components/Primitives";
@@ -11,12 +12,23 @@ export default function DashboardPage() {
   const qc = useQueryClient();
   const { data: tasks = [] } = useQuery({ queryKey: ["tasks"], queryFn: () => api.tasks.list() });
   const { data: projects = [] } = useQuery({ queryKey: ["projects"], queryFn: () => api.projects.list() });
-  const { data: plan } = useQuery({ queryKey: ["plan-today"], queryFn: () => api.plans.today() });
+  const { data: plan } = useQuery({
+    queryKey: ["plan-today"],
+    queryFn: () => api.plans.today(),
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
+  });
   const { data: alerts = [] } = useQuery({ queryKey: ["notifications"], queryFn: () => api.notifications.list() });
 
+  const [whyOpen, setWhyOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+
   const regen = useMutation({
-    mutationFn: () => api.plans.generate(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["plan-today"] }),
+    mutationFn: (body?: { guidance?: string }) => api.plans.generate(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["plan-today"] });
+      setEditOpen(false);
+    },
   });
 
   const topTasks = tasks
@@ -66,7 +78,7 @@ export default function DashboardPage() {
           </button>
           <button
             className="btn primary"
-            onClick={() => regen.mutate()}
+            onClick={() => regen.mutate(undefined)}
             disabled={regen.isPending}
           >
             <Icon name="sparkles" size={14} /> {regen.isPending ? "Thinking…" : "Regenerate plan"}
@@ -136,8 +148,22 @@ export default function DashboardPage() {
               <b>Proposed plan</b> · generated {plan ? fmtRelative(plan.createdAt) : "—"} by Cortex
             </span>
             <div className="row gap-2">
-              <button className="btn ghost" style={{ fontSize: 11 }}>Why this?</button>
-              <button className="btn" style={{ fontSize: 11 }}>Edit</button>
+              <button
+                className="btn ghost"
+                style={{ fontSize: 11 }}
+                disabled={!plan}
+                onClick={() => setWhyOpen(true)}
+              >
+                Why this?
+              </button>
+              <button
+                className="btn"
+                style={{ fontSize: 11 }}
+                disabled={!plan}
+                onClick={() => setEditOpen(true)}
+              >
+                Edit
+              </button>
             </div>
           </div>
           <div>
@@ -270,6 +296,156 @@ export default function DashboardPage() {
                   </div>
                 ))}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {whyOpen && plan && (
+        <WhyThisModal plan={plan} onClose={() => setWhyOpen(false)} />
+      )}
+      {editOpen && plan && (
+        <EditPlanModal
+          plan={plan}
+          pending={regen.isPending}
+          onClose={() => setEditOpen(false)}
+          onSubmit={(guidance) => regen.mutate({ guidance })}
+        />
+      )}
+    </div>
+  );
+}
+
+function WhyThisModal({ plan, onClose }: { plan: Plan; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const inputs = plan.content.inputs;
+  const fmtHM = (iso: string) => {
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  return (
+    <div
+      role="dialog"
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "grid", placeItems: "center", zIndex: 200 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="panel"
+        style={{ width: 520, maxWidth: "92vw", maxHeight: "85vh", overflow: "auto", background: "var(--panel)" }}
+      >
+        <div className="panel-hd">
+          <span className="title"><b>Why this plan?</b></span>
+          <button className="btn ghost" onClick={onClose}><Icon name="x" size={12} /></button>
+        </div>
+        <div className="panel-bd" style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 12.5 }}>{plan.content.summary}</div>
+          <div className="muted mono" style={{ fontSize: 10.5 }}>
+            {plan.generatedBy} · {plan.content.generatedAt ? fmtRelative(plan.content.generatedAt) : fmtRelative(plan.createdAt)}
+          </div>
+          {inputs?.guidance && (
+            <div style={{ border: "1px solid var(--hair-2)", padding: "6px 8px", fontSize: 12 }}>
+              <div className="caps" style={{ fontSize: 10 }}>your guidance</div>
+              <div>{inputs.guidance}</div>
+            </div>
+          )}
+          <div>
+            <div className="caps" style={{ fontSize: 10 }}>events considered ({inputs?.events.length ?? 0})</div>
+            {(inputs?.events ?? []).map((e, i) => (
+              <div key={i} className="mono" style={{ fontSize: 11.5, padding: "2px 0" }}>
+                {fmtHM(e.start)}–{fmtHM(e.end)} · {e.title}
+              </div>
+            ))}
+            {!inputs?.events.length && <div className="muted" style={{ fontSize: 11.5 }}>none</div>}
+          </div>
+          <div>
+            <div className="caps" style={{ fontSize: 10 }}>free blocks ({inputs?.freeBlocks.length ?? 0})</div>
+            {(inputs?.freeBlocks ?? []).map((b, i) => (
+              <div key={i} className="mono" style={{ fontSize: 11.5, padding: "2px 0" }}>
+                {fmtHM(b.start)}–{fmtHM(b.end)}
+              </div>
+            ))}
+            {!inputs?.freeBlocks.length && <div className="muted" style={{ fontSize: 11.5 }}>none</div>}
+          </div>
+          <div>
+            <div className="caps" style={{ fontSize: 10 }}>top tasks ({inputs?.tasks.length ?? 0})</div>
+            {(inputs?.tasks ?? []).slice(0, 10).map((t) => (
+              <div key={t.id} style={{ fontSize: 12, padding: "2px 0" }}>
+                <span className="mono muted" style={{ marginRight: 6 }}>{t.priority}</span>
+                {t.title}
+              </div>
+            ))}
+            {!inputs?.tasks.length && <div className="muted" style={{ fontSize: 11.5 }}>none</div>}
+          </div>
+          {!inputs && (
+            <div className="muted" style={{ fontSize: 11.5 }}>
+              Inputs weren&apos;t captured for this plan. Hit <b>Regenerate plan</b> to produce one with full rationale.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditPlanModal({
+  plan,
+  pending,
+  onClose,
+  onSubmit,
+}: {
+  plan: Plan;
+  pending: boolean;
+  onClose: () => void;
+  onSubmit: (guidance: string) => void;
+}) {
+  const [guidance, setGuidance] = useState(plan.content.inputs?.guidance ?? "");
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      role="dialog"
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", display: "grid", placeItems: "center", zIndex: 200 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="panel"
+        style={{ width: 480, maxWidth: "92vw", background: "var(--panel)" }}
+      >
+        <div className="panel-hd">
+          <span className="title"><b>Edit plan</b></span>
+          <button className="btn ghost" onClick={onClose} disabled={pending}><Icon name="x" size={12} /></button>
+        </div>
+        <div className="panel-bd" style={{ display: "grid", gap: 10 }}>
+          <div className="muted" style={{ fontSize: 12 }}>
+            Tell Cortex how to replan. It will keep confirmed events and rebuild the rest around your guidance.
+          </div>
+          <textarea
+            placeholder="e.g. move deep work to the morning, leave 4-5pm open for a walk, don't schedule anything before 9"
+            value={guidance}
+            onChange={(e) => setGuidance(e.target.value)}
+            rows={4}
+            maxLength={500}
+            className="mono"
+            style={{ border: "1px solid var(--hair-2)", padding: "6px 8px", background: "var(--bg)", fontSize: 12, resize: "vertical" }}
+            autoFocus
+          />
+          <div className="row gap-2" style={{ justifyContent: "flex-end" }}>
+            <button className="btn ghost" onClick={onClose} disabled={pending}>Cancel</button>
+            <button
+              className="btn primary"
+              disabled={pending || !guidance.trim()}
+              onClick={() => onSubmit(guidance.trim())}
+            >
+              {pending ? "Replanning…" : "Replan"}
+            </button>
           </div>
         </div>
       </div>

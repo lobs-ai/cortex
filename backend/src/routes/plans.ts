@@ -1,10 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { currentUser } from "../lib/user.js";
-import { getLatestPlan } from "../services/plans.js";
-import { generateDailyPlan } from "../ai/planner.js";
-import { db, schema } from "../db/client.js";
-import { newId } from "../lib/ids.js";
+import { getLatestPlan, regenerateDailyPlan } from "../services/plans.js";
 import { findFreeBlocks, createScheduledBlock } from "../services/scheduling.js";
 
 export async function planRoutes(app: FastifyInstance) {
@@ -12,8 +9,7 @@ export async function planRoutes(app: FastifyInstance) {
     const u = currentUser(req);
     const plan = await getLatestPlan(u.id, "daily");
     if (plan) return plan;
-    const fresh = await generateDailyPlan(u.id, new Date());
-    return persist(u.id, "daily", fresh);
+    return regenerateDailyPlan(u.id);
   });
 
   app.get("/api/plans/week", async (req, reply) => {
@@ -25,10 +21,13 @@ export async function planRoutes(app: FastifyInstance) {
 
   app.post("/api/plans/generate", async (req) => {
     const u = currentUser(req);
-    const { date } = z.object({ date: z.coerce.date().optional() }).parse(req.body ?? {});
-    const d = date ?? new Date();
-    const fresh = await generateDailyPlan(u.id, d);
-    return persist(u.id, "daily", fresh);
+    const { date, guidance } = z
+      .object({
+        date: z.coerce.date().optional(),
+        guidance: z.string().trim().max(500).optional(),
+      })
+      .parse(req.body ?? {});
+    return regenerateDailyPlan(u.id, date ?? new Date(), { guidance });
   });
 
   app.post("/api/schedule/suggest", async (req) => {
@@ -58,32 +57,4 @@ export async function planRoutes(app: FastifyInstance) {
     const id = await createScheduledBlock(u.id, body);
     return { id };
   });
-}
-
-async function persist(userId: string, type: "daily" | "weekly", fresh: Awaited<ReturnType<typeof generateDailyPlan>>) {
-  const now = new Date();
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const end = new Date(today);
-  end.setDate(end.getDate() + 1);
-  const id = newId("plan");
-  await db.insert(schema.plans).values({
-    id,
-    userId,
-    planType: type,
-    periodStart: today,
-    periodEnd: end,
-    contentJson: JSON.stringify({ ...fresh, generatedAt: now.toISOString() }),
-    generatedBy: fresh.generatedBy,
-    createdAt: now,
-  });
-  return {
-    id,
-    type,
-    periodStart: today,
-    periodEnd: end,
-    content: { ...fresh, generatedAt: now.toISOString() },
-    generatedBy: fresh.generatedBy,
-    createdAt: now,
-  };
 }

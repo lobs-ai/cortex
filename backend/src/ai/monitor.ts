@@ -1,6 +1,8 @@
 import { listEvents } from "../services/events.js";
 import { listTasks } from "../services/tasks.js";
 import { createNotification, listActiveNotifications } from "../services/notifications.js";
+import { getLatestPlan } from "../services/plans.js";
+import type { PlanBlock } from "./planner.js";
 
 type Proposal = {
   severity: "high" | "med" | "low";
@@ -15,10 +17,16 @@ type Proposal = {
 // Deterministic rule-first monitor per design §12.4. LLM upgrade goes here later.
 export async function runMonitor(userId: string): Promise<Proposal[]> {
   const now = new Date();
-  const [tasks, events, existing] = await Promise.all([
+  const todayStart = new Date(now);
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date(todayStart);
+  todayEnd.setDate(todayEnd.getDate() + 1);
+  const [tasks, events, existing, plan, todaysEvents] = await Promise.all([
     listTasks(userId),
     listEvents(userId, { from: now, to: addHours(now, 48) }),
     listActiveNotifications(userId),
+    getLatestPlan(userId, "daily"),
+    listEvents(userId, { from: todayStart, to: todayEnd }),
   ]);
 
   const open = tasks.filter((t) => t.status !== "done");
@@ -72,6 +80,63 @@ export async function runMonitor(userId: string): Promise<Proposal[]> {
     });
   }
 
+  // plan-aware: block_conflict — a today event overlaps a plan block that isn't that event
+  if (plan && Array.isArray(plan.content?.blocks)) {
+    const blocks = plan.content.blocks as PlanBlock[];
+    for (const ev of todaysEvents) {
+      if (+ev.end <= +now) continue; // already past
+      const evStart = minutesInto(todayStart, ev.start);
+      const evEnd = minutesInto(todayStart, ev.end);
+      for (const b of blocks) {
+        // Only flag "planned work" blocks, not the meeting echoes of real events.
+        if (b.kind !== "block") continue;
+        const bStart = hmToMinutes(b.start);
+        const bEnd = hmToMinutes(b.end);
+        if (bEnd <= bStart) continue;
+        if (overlaps(evStart, evEnd, bStart, bEnd)) {
+          proposals.push({
+            severity: b.hero ? "high" : "med",
+            kind: "block_conflict",
+            title: `"${ev.title}" conflicts with ${b.hero ? "your focus block" : b.label}`,
+            body: `${b.start}–${b.end} was reserved for ${b.label}. ${ev.title} now overlaps.`,
+            actions: ["Reschedule block", "Regenerate plan"],
+            relatedType: "event",
+            relatedId: ev.id,
+          });
+          break;
+        }
+      }
+    }
+
+    // plan-aware: hero_shrunk — hero block ends before now or has <25m remaining usable
+    const hero = blocks.find((b) => b.hero);
+    if (hero) {
+      const heroStart = hmToMinutes(hero.start);
+      const heroEnd = hmToMinutes(hero.end);
+      const nowMin = minutesInto(todayStart, now);
+      let usable = Math.max(0, heroEnd - Math.max(heroStart, nowMin));
+      for (const ev of todaysEvents) {
+        const evStart = Math.max(heroStart, minutesInto(todayStart, ev.start));
+        const evEnd = Math.min(heroEnd, minutesInto(todayStart, ev.end));
+        if (evEnd > evStart && evStart < heroEnd && evEnd > Math.max(heroStart, nowMin)) {
+          usable -= Math.min(evEnd, heroEnd) - Math.max(evStart, Math.max(heroStart, nowMin));
+        }
+      }
+      const planned = Math.max(1, heroEnd - heroStart);
+      if (usable > 0 && usable < 25 && planned >= 45) {
+        proposals.push({
+          severity: "med",
+          kind: "hero_shrunk",
+          title: `Focus window down to ${Math.max(0, Math.round(usable))}m`,
+          body: `Planned ${planned}m for "${hero.label}". Want Cortex to find a fresh block?`,
+          actions: ["Regenerate plan"],
+          relatedType: null,
+          relatedId: null,
+        });
+      }
+    }
+  }
+
   // dedup against existing active notifications (same kind + relatedId)
   const seen = new Set(existing.map((n) => `${n.kind}:${n.relatedId ?? ""}`));
   const fresh = proposals.filter((p) => !seen.has(`${p.kind}:${p.relatedId ?? ""}`));
@@ -93,4 +158,17 @@ export async function runMonitor(userId: string): Promise<Proposal[]> {
 
 function addHours(d: Date, h: number) {
   return new Date(+d + h * 3_600_000);
+}
+
+function hmToMinutes(hm: string): number {
+  const [h, m] = hm.split(":").map((n) => parseInt(n, 10));
+  return (h || 0) * 60 + (m || 0);
+}
+
+function minutesInto(dayStart: Date, d: Date): number {
+  return Math.round((+d - +dayStart) / 60000);
+}
+
+function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+  return aStart < bEnd && bStart < aEnd;
 }

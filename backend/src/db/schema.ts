@@ -247,6 +247,17 @@ export const providerApiKeys = sqliteTable("provider_api_keys", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+export const journalEntries = sqliteTable("journal_entries", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  eventId: text("event_id"),
+  kind: text("kind").notNull(), // "reflection" | "quick_log"
+  rating: integer("rating"), // 1-5, null for quick_log
+  note: text("note").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const scheduledBlocks = sqliteTable("scheduled_blocks", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),

@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Icon, type IconName } from "./Icon";
 import { RightRail } from "./RightRail";
 import { SettingsModal } from "./SettingsModal";
+import { QuickLog } from "./QuickLog";
 import { api } from "../lib/api";
 
 const TABS: { id: string; label: string; icon: IconName; k: string; path: string }[] = [
@@ -249,6 +250,7 @@ export function Shell({ children }: { children: ReactNode }) {
       )}
 
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      <QuickLog />
     </div>
   );
 }
