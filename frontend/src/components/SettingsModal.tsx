@@ -961,7 +961,7 @@ function ActionBlock({
   return (
     <div>
       <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 8 }}>
-        3. Connect
+        3. Connect &amp; configure
       </div>
       {!configured ? (
         <div
@@ -1006,6 +1006,7 @@ function ActionBlock({
               Disconnect Google
             </button>
           </div>
+          <CalendarWriteSection onChanged={onChanged} />
         </div>
       ) : (
         <button
@@ -1021,6 +1022,64 @@ function ActionBlock({
         <div style={{ color: "var(--red, #ef4444)", fontSize: 11.5, marginTop: 8 }}>
           {error}
         </div>
+      )}
+    </div>
+  );
+}
+
+function CalendarWriteSection({ onChanged }: { onChanged: () => void }) {
+  const qc = useQueryClient();
+  const { data: calendars, isError } = useQuery({
+    queryKey: ["google-calendars"],
+    queryFn: () => api.integrations.listGoogleCalendars(),
+    retry: false,
+  });
+  const { data: writeCalData } = useQuery({
+    queryKey: ["google-write-calendar"],
+    queryFn: () => api.integrations.getWriteCalendar(),
+  });
+
+  const save = useMutation({
+    mutationFn: (calendarId: string | null) => api.integrations.setWriteCalendar(calendarId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["google-write-calendar"] });
+      onChanged();
+    },
+  });
+
+  const currentId = writeCalData?.calendarId ?? null;
+
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--hair-2)" }}>
+      <div className="caps muted" style={{ fontSize: 10.5, marginBottom: 8 }}>
+        Write calendar
+      </div>
+      {isError ? (
+        <div className="muted" style={{ fontSize: 11.5 }}>
+          Reconnect Google with the latest scopes to enable calendar write access.
+        </div>
+      ) : !calendars ? (
+        <div className="muted" style={{ fontSize: 11.5 }}>Loading…</div>
+      ) : (
+        <>
+          <select
+            value={currentId ?? ""}
+            onChange={(e) => save.mutate(e.target.value || null)}
+            style={{ ...selectStyle, width: "100%" }}
+          >
+            <option value="">None — don&apos;t write to Google Calendar</option>
+            {calendars.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.summary}{c.primary ? " (primary)" : ""}
+              </option>
+            ))}
+          </select>
+          <div className="muted" style={{ fontSize: 10.5, marginTop: 4 }}>
+            {currentId
+              ? "Agent-created events will be pushed to this calendar."
+              : "Pick a calendar and agent-created events will appear there automatically."}
+          </div>
+        </>
       )}
     </div>
   );

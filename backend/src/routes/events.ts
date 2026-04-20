@@ -8,6 +8,7 @@ import {
   getEvent,
   listEvents,
   patchEvent,
+  rsvpEvent,
 } from "../services/events.js";
 import { syncCalendar } from "../services/googleCalendar.js";
 
@@ -51,6 +52,23 @@ export async function eventRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string() }).parse(req.params);
     await deleteEvent(u.id, id);
     return { ok: true };
+  });
+
+  app.post("/api/events/:id/rsvp", async (req, reply) => {
+    const u = currentUser(req);
+    const { id } = z.object({ id: z.string() }).parse(req.params);
+    const body = z.object({
+      response: z.enum(["accepted", "declined", "tentative"]),
+      proposedStart: z.coerce.date().optional(),
+      proposedEnd: z.coerce.date().optional(),
+    }).parse(req.body);
+    const proposedTime =
+      body.proposedStart && body.proposedEnd
+        ? { start: body.proposedStart, end: body.proposedEnd }
+        : undefined;
+    const e = await rsvpEvent(u.id, id, body.response, proposedTime);
+    if (!e) return reply.code(404).send({ error: "not_found" });
+    return e;
   });
 
   app.post("/api/calendar/sync", async (req, reply) => {

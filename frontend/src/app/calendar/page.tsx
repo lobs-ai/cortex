@@ -15,7 +15,13 @@ const GRID_HEIGHT = HOURS.length * HOUR_PX;
 
 export default function CalendarPage() {
   const qc = useQueryClient();
-  const [view, setView] = useState<View>("day");
+  const [view, setView] = useState<View>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("cal-view");
+      if (saved === "day" || saved === "week" || saved === "month") return saved;
+    }
+    return "day";
+  });
   const [offset, setOffset] = useState(0); // days from today
   const [showCreate, setShowCreate] = useState(false);
 
@@ -55,6 +61,14 @@ export default function CalendarPage() {
     queryKey: ["events", rangeFrom.toISOString(), rangeTo.toISOString()],
     queryFn: () => api.events.list(rangeFrom, rangeTo),
   });
+
+  const rsvp = useMutation({
+    mutationFn: ({ id, response }: { id: string; response: "accepted" | "declined" | "tentative" }) =>
+      api.events.rsvp(id, response),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["events"] }),
+  });
+
+  const pendingInvites = events.filter((e) => e.rsvpStatus === "needsAction");
 
   const createEvent = useMutation({
     mutationFn: (body: { title: string; startTime: Date; endTime: Date; kind: Event["kind"]; location?: string }) =>
@@ -100,7 +114,7 @@ export default function CalendarPage() {
         <div className="grow" />
         <div className="seg">
           {(["day", "week", "month"] as const).map((v) => (
-            <button key={v} data-active={view === v} onClick={() => setView(v)}>
+            <button key={v} data-active={view === v} onClick={() => { setView(v); localStorage.setItem("cal-view", v); }}>
               {v[0].toUpperCase() + v.slice(1)}
             </button>
           ))}
@@ -109,6 +123,14 @@ export default function CalendarPage() {
           <Icon name="plus" size={14} /> New event
         </button>
       </div>
+
+      {pendingInvites.length > 0 && (
+        <PendingInvitesStrip
+          invites={pendingInvites}
+          onRsvp={(id, response) => rsvp.mutate({ id, response })}
+          busy={rsvp.isPending}
+        />
+      )}
 
       {view === "day" && <DayGrid today={today} eventsByDay={eventsByDay} offset={offset} />}
       {view === "week" && (
@@ -124,6 +146,68 @@ export default function CalendarPage() {
           pending={createEvent.isPending}
         />
       )}
+    </div>
+  );
+}
+
+function PendingInvitesStrip({
+  invites,
+  onRsvp,
+  busy,
+}: {
+  invites: Event[];
+  onRsvp: (id: string, response: "accepted" | "declined" | "tentative") => void;
+  busy: boolean;
+}) {
+  return (
+    <div
+      style={{
+        borderBottom: "1px solid var(--hair)",
+        background: "color-mix(in oklch, var(--amber, #f59e0b), transparent 92%)",
+        padding: "6px 12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+      }}
+    >
+      <div className="caps muted" style={{ fontSize: 10, marginBottom: 2 }}>
+        {invites.length} invite{invites.length > 1 ? "s" : ""} — Cortex will auto-accept if no conflicts
+      </div>
+      {invites.map((ev) => (
+        <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+          <span style={{ flex: 1, fontWeight: 500 }} className="truncate">
+            {ev.title}
+          </span>
+          <span className="muted mono" style={{ fontSize: 10.5, whiteSpace: "nowrap" }}>
+            {fmtDateShort(new Date(ev.start))} {fmtHM(new Date(ev.start))}
+          </span>
+          <button
+            className="btn"
+            style={{ fontSize: 10.5, padding: "2px 8px" }}
+            disabled={busy}
+            onClick={() => onRsvp(ev.id, "declined")}
+          >
+            Decline
+          </button>
+          <button
+            className="btn"
+            style={{ fontSize: 10.5, padding: "2px 8px" }}
+            disabled={busy}
+            onClick={() => onRsvp(ev.id, "tentative")}
+            title="Mark as tentative — or ask Cortex to propose a new time"
+          >
+            Propose time
+          </button>
+          <button
+            className="btn ghost"
+            style={{ fontSize: 10.5, padding: "2px 8px", opacity: 0.6 }}
+            disabled={busy}
+            onClick={() => onRsvp(ev.id, "accepted")}
+          >
+            Accept now
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -155,12 +239,22 @@ function DayColumn({
     <div className="day-col" style={{ position: "relative", height: GRID_HEIGHT }}>
       {events.map((ev) => {
         const { top, height } = eventStyle(ev, date);
+        const pending = ev.rsvpStatus === "needsAction";
         return (
-          <div key={ev.id} className={`evt ${ev.kind}`} style={{ top, height }}>
+          <div
+            key={ev.id}
+            className={`evt ${ev.kind}`}
+            style={{
+              top,
+              height,
+              ...(pending ? { borderStyle: "dashed", opacity: 0.8 } : {}),
+            }}
+          >
             <div className="t truncate">{ev.title}</div>
             <div className="m">
               {fmtHM(new Date(ev.start))}–{fmtHM(new Date(ev.end))}
               {ev.location ? " · " + ev.location : ""}
+              {pending ? " · pending" : ""}
             </div>
           </div>
         );
@@ -240,7 +334,7 @@ function WeekGrid({
       d.setDate(sunday.getDate() + i);
       return d;
     });
-  }, [today, weekOffset]);
+  }, [today, offset]);
   const scrollRef = useRef<HTMLDivElement>(null);
   useAutoScrollToNow(scrollRef);
 

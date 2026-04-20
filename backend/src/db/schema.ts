@@ -69,6 +69,7 @@ export const events = sqliteTable("events", {
   kind: text("kind").notNull().default("meeting"),
   projectId: text("project_id"),
   attendeesJson: text("attendees_json"),
+  rsvpStatus: text("rsvp_status"), // "needsAction" | "accepted" | "declined" | "tentative"
   important: integer("important", { mode: "boolean" }).notNull().default(false),
   status: text("status").notNull().default("confirmed"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),

@@ -24,6 +24,7 @@ export const GOOGLE_FEATURE_PROVIDERS = ["google_calendar", "gmail", "google_dri
 export type GoogleFeatureProvider = (typeof GOOGLE_FEATURE_PROVIDERS)[number];
 
 const SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/calendar.readonly",
   "https://www.googleapis.com/auth/gmail.readonly",
   "https://www.googleapis.com/auth/drive.metadata.readonly",

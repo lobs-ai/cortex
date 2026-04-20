@@ -13,10 +13,11 @@ import {
   mintState,
   upsertGoogleConnection,
 } from "../services/googleAuth.js";
-import { syncCalendar } from "../services/googleCalendar.js";
+import { listCalendars, syncCalendar } from "../services/googleCalendar.js";
 import {
   clearConfig,
   describeConfig,
+  getConfig,
   setConfig,
 } from "../services/integrationConfigs.js";
 
@@ -274,6 +275,30 @@ export async function integrationsManageRoutes(app: FastifyInstance) {
       const msg = err instanceof Error ? err.message : String(err);
       return respond(false, msg);
     }
+  });
+
+  app.get("/api/integrations/google/calendars", async (req, reply) => {
+    const u = currentUser(req);
+    try {
+      const cals = await listCalendars(u.id);
+      return cals;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return reply.code(400).send({ error: msg });
+    }
+  });
+
+  app.get("/api/integrations/google/write-calendar", async (req) => {
+    const u = currentUser(req);
+    const cfg = await getConfig(u.id, "google_calendar");
+    return { calendarId: cfg.write_calendar_id ?? null };
+  });
+
+  app.put("/api/integrations/google/write-calendar", async (req) => {
+    const u = currentUser(req);
+    const { calendarId } = z.object({ calendarId: z.string().nullable() }).parse(req.body);
+    await setConfig(u.id, "google_calendar", { write_calendar_id: calendarId });
+    return { ok: true };
   });
 
   app.post("/api/integrations/google/disconnect", async (req) => {

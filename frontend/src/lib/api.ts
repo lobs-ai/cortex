@@ -40,6 +40,7 @@ export type Event = {
   kind: "meeting" | "class" | "teach" | "personal" | "deadline" | "block";
   project: string | null;
   attendees: number | null;
+  rsvpStatus: "needsAction" | "accepted" | "declined" | "tentative" | null;
   important: boolean;
   status: string;
 };
@@ -197,6 +198,20 @@ export const api = {
     patch: (id: string, body: Partial<Event>) =>
       req<Event>(`/api/events/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
     remove: (id: string) => req<{ ok: boolean }>(`/api/events/${id}`, { method: "DELETE" }),
+    rsvp: (
+      id: string,
+      response: "accepted" | "declined" | "tentative",
+      proposedTime?: { start: Date; end: Date },
+    ) =>
+      req<Event>(`/api/events/${id}/rsvp`, {
+        method: "POST",
+        body: JSON.stringify({
+          response,
+          ...(proposedTime
+            ? { proposedStart: proposedTime.start.toISOString(), proposedEnd: proposedTime.end.toISOString() }
+            : {}),
+        }),
+      }),
   },
   projects: { list: () => req<Project[]>("/api/projects") },
   plans: {
@@ -328,6 +343,17 @@ export const api = {
       ),
     disconnectGoogle: () =>
       req<{ ok: boolean }>("/api/integrations/google/disconnect", { method: "POST" }),
+    listGoogleCalendars: () =>
+      req<Array<{ id: string; summary: string; primary: boolean }>>(
+        "/api/integrations/google/calendars",
+      ),
+    getWriteCalendar: () =>
+      req<{ calendarId: string | null }>("/api/integrations/google/write-calendar"),
+    setWriteCalendar: (calendarId: string | null) =>
+      req<{ ok: boolean }>("/api/integrations/google/write-calendar", {
+        method: "PUT",
+        body: JSON.stringify({ calendarId }),
+      }),
     getConfig: (provider: string) =>
       req<{
         provider: string;

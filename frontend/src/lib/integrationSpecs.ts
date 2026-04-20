@@ -53,14 +53,14 @@ export const INTEGRATION_SPECS: IntegrationSpec[] = [
     id: "google",
     label: "Google",
     summary:
-      "One OAuth consent covers Calendar, Gmail, and Drive (read-only). Toggle individual products off anytime.",
+      "One OAuth consent covers Calendar (read + write), Gmail, and Drive. Toggle individual products off anytime.",
     configProvider: "google",
     oauth: true,
     features: [
       {
         id: "google_calendar",
         label: "Google Calendar",
-        description: "Syncs events from your primary calendar into Cortex.",
+        description: "Syncs events from your primary calendar into Cortex. Agent-created events are pushed to your chosen write calendar.",
         implementation: "live",
       },
       {
@@ -91,7 +91,7 @@ export const INTEGRATION_SPECS: IntegrationSpec[] = [
       },
       {
         title: "Configure the OAuth consent screen",
-        body: "Type: External. Add your own Google account as a test user. Add scopes: calendar.readonly, gmail.readonly, drive.metadata.readonly, userinfo.email, openid.",
+        body: "Type: External. Add your own Google account as a test user. Add scopes: calendar.events, calendar.readonly, gmail.readonly, drive.metadata.readonly, userinfo.email, openid.",
         link: {
           label: "OAuth consent screen",
           href: "https://console.cloud.google.com/apis/credentials/consent",

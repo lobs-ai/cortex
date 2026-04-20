@@ -1,7 +1,12 @@
 import { and, asc, eq, gte, lte, ne } from "drizzle-orm";
-import { db, schema } from "../db/client.js";
+import { db, rawDb, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
 import type { EventCreateInput, EventPatchInput } from "../schemas/events.js";
+import { getConfigField } from "./integrationConfigs.js";
+import { isFeatureEnabled } from "./googleAuth.js";
+import { pushEventToGoogle, deleteGoogleEvent, respondToGoogleEvent } from "./googleCalendar.js";
+
+try { rawDb.exec("ALTER TABLE events ADD COLUMN rsvp_status TEXT"); } catch { /* column exists */ }
 
 type Row = typeof schema.events.$inferSelect;
 
@@ -15,6 +20,7 @@ const hydrate = (r: Row) => ({
   kind: r.kind,
   project: r.projectId,
   attendees: r.attendeesJson ? (JSON.parse(r.attendeesJson) as { count?: number }).count ?? null : null,
+  rsvpStatus: r.rsvpStatus as "needsAction" | "accepted" | "declined" | "tentative" | null,
   important: !!r.important,
   status: r.status,
 });
@@ -59,6 +65,27 @@ export async function createEvent(userId: string, input: EventCreateInput) {
     createdAt: now,
     updatedAt: now,
   });
+
+  try {
+    const writeCalId = await getConfigField(userId, "google_calendar", "write_calendar_id");
+    if (writeCalId && (await isFeatureEnabled(userId, "google_calendar"))) {
+      const googleId = await pushEventToGoogle(userId, writeCalId, {
+        title: input.title,
+        description: input.description,
+        startTime: input.startTime,
+        endTime: input.endTime,
+      });
+      if (googleId) {
+        await db
+          .update(schema.events)
+          .set({ externalId: googleId })
+          .where(eq(schema.events.id, id));
+      }
+    }
+  } catch {
+    // Never fail event creation due to Google sync issues
+  }
+
   return (await getEvent(userId, id))!;
 }
 
@@ -84,8 +111,50 @@ export async function patchEvent(userId: string, id: string, input: EventPatchIn
   return getEvent(userId, id);
 }
 
+export async function rsvpEvent(
+  userId: string,
+  id: string,
+  response: "accepted" | "declined" | "tentative",
+  proposedTime?: { start: Date; end: Date },
+) {
+  const [row] = await db
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.userId, userId), eq(schema.events.id, id)));
+  if (!row) return null;
+
+  await db
+    .update(schema.events)
+    .set({ rsvpStatus: response, updatedAt: new Date() })
+    .where(eq(schema.events.id, id));
+
+  if (row.externalId) {
+    try {
+      await respondToGoogleEvent(userId, row.externalId, response, proposedTime);
+    } catch {
+      // Local update succeeded; Google sync best-effort
+    }
+  }
+
+  return getEvent(userId, id);
+}
+
 export async function deleteEvent(userId: string, id: string) {
+  const [row] = await db
+    .select()
+    .from(schema.events)
+    .where(and(eq(schema.events.userId, userId), eq(schema.events.id, id)));
+
   await db
     .delete(schema.events)
     .where(and(eq(schema.events.userId, userId), eq(schema.events.id, id)));
+
+  if (row?.externalId && !row.provider) {
+    try {
+      const writeCalId = await getConfigField(userId, "google_calendar", "write_calendar_id");
+      if (writeCalId) await deleteGoogleEvent(userId, writeCalId, row.externalId);
+    } catch {
+      // Don't fail if Google delete fails
+    }
+  }
 }
