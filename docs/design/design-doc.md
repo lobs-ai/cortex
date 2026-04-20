@@ -326,7 +326,19 @@ Sections:
 - Docker for deployment
 - Optional Nginx or Caddy reverse proxy
 
-## 9.2 Services/modules
+## 9.2 Reference implementation
+[`lobs-ai/agentic`](https://github.com/lobs-ai/agentic) (local checkout: `~/other/lobs/agentic`) is the reference for how the AI/backend layer is structured. We don't need most of it, but these parts map directly onto Cortex and should be followed:
+
+- **Multi-provider LLM client** (`packages/llm`) — provider-prefixed model strings (`anthropic/...`, `openai/...`, `openrouter/...`, `lmstudio/...`), `createResilientClient` with retries, fallback chains, circuit breaker, key rotation, and sticky session keys for prompt-cache hits. Cortex should use this pattern (or this package directly) so the planner/monitor/chat roles can swap models without touching call sites.
+- **Tool registry + executor** (`packages/tools`) — each tool is `{ definition, execute }` with an Anthropic-compatible `input_schema`. `executeTool(name, params, cwd)` dispatches by name. Cortex will need domain tools (create_task, move_event, find_free_block, send_discord_message, etc.) registered the same way.
+- **Runner think→act loop** (`packages/runner`) — LLM call → tool calls → observe results → next LLM call, until the model emits a final text response. This is the pattern Cortex needs for multi-step actions (see §11.6).
+- **Lifecycle hooks** — `before_tool_call` / `after_tool_call` / `before_llm_call` / `after_llm_call` / `on_error` / `session_compacted`. Useful for permission gating (§20.3 action safety), audit logging, and notification-side-effect capture.
+- **Loop detection + context compaction** — avoids runaway tool calls and keeps long-running sessions inside the context window. Both matter for proactive wake-ups that may iterate.
+- **Session transcripts** — each run writes a JSONL + markdown transcript. Cortex should persist these (or equivalent) into `assistant_runs` / `assistant_messages` so chats are resumable and proactive runs are auditable.
+
+We do **not** need agentic's generic file/shell tools, its subagent-spawning, or its CLI-first ergonomics. Cortex tools are domain tools over our data model, not filesystem tools.
+
+## 9.3 Services/modules
 
 ### Auth service
 - session or JWT auth
@@ -635,6 +647,70 @@ Example planning output:
 }
 ```
 
+## 11.4 LLM provider abstraction
+The AI orchestration layer must not be hardcoded to one provider. Follow the `@agentic/llm` pattern:
+
+- Model is identified by a `provider/model-id` string (`anthropic/claude-sonnet-4-...`, `openai/gpt-4.1`, `openrouter/...`, `lmstudio/...`).
+- Each AI role (planner, monitor, curator, chat) is configured with a primary model + a fallback chain, not a hardcoded client.
+- A resilient wrapper handles retries, exponential backoff, circuit breaking per (provider, model), and rotation across multiple API keys per provider.
+- Sticky session IDs keep a single chat / proactive run pinned to the same key so Anthropic prompt caching keeps hitting.
+- Cost per 1M in/out tokens is tracked per model; each assistant run records token usage and estimated cost into `assistant_runs`.
+
+Rationale: different roles want different price/latency/quality tradeoffs (e.g. monitor is cheap and frequent, planner is premium and rare), and provider outages shouldn't take down the whole assistant.
+
+## 11.5 Tool / skill system
+The LLM interacts with Cortex through a **tool registry**, not by emitting free-form intents we then parse.
+
+- Each tool = `{ name, description, input_schema (JSON Schema), execute(params, ctx) }`. Schemas are Anthropic-tool-use-compatible so they pass straight into `tools: [...]` on the API call.
+- Tools are domain-scoped and thin wrappers over the service layer (§9.3). The service layer owns validation, auth, and DB writes; the tool layer owns LLM-facing shape.
+- Per-role tool subsets: the planner gets read/scheduling tools, the chat role gets the full CRUD set, the monitor gets read-only + `propose_notification`. Don't hand every role every tool.
+- Permission level is part of the tool definition and enforced by a `before_tool_call` hook (maps to §20.3): `read_only` runs freely, `suggest_and_confirm` produces a pending proposal the user approves in UI, `auto_act` runs only if the user has whitelisted that tool category.
+- Illustrative tools:
+  - `get_day_state(date)` — read tasks, events, free blocks, active alerts
+  - `create_task`, `update_task`, `complete_task`
+  - `move_event`, `create_event`
+  - `schedule_block(task_id, start, end)` — proposes a `scheduled_blocks` row
+  - `find_free_blocks(range, min_duration)`
+  - `get_memory(query)` / `record_tendency(...)`
+  - `send_notification(channel, category, body)` — gated by policy in §12.5
+  - `propose_plan(...)` — writes a draft `plans` row for user approval
+
+Registering new tools must not require changing the runner — it's a lookup by name.
+
+## 11.6 Agent action loop (multi-step tool use)
+A single user message or proactive trigger often requires **several** actions: e.g. a morning wake-up may need to read calendar + tasks, detect conflicts, move two tasks, create a focus block, and draft a Discord summary. Similarly in chat ("clean up my afternoon") the model has to call multiple tools in sequence.
+
+The assistant therefore runs a **think → act → observe** loop, not a single LLM call:
+
+```text
+build role-scoped context
+   ↓
+loop:
+   call LLM with (system, messages, tool definitions)
+   if response has tool_use blocks:
+     for each tool_use:
+       run before_tool_call hook (permission gate)
+       execute tool → tool_result
+       run after_tool_call hook (audit log)
+     append tool_use + tool_result to messages
+     continue loop
+   else:
+     final assistant message → return
+```
+
+Requirements:
+
+- **Turn cap**: every run has a `maxTurns` (e.g. 25 for chat, 15 for proactive wake-ups). Exceeding it aborts cleanly and logs a `turn_limit` outcome.
+- **Time cap**: every run has a wall-clock timeout enforced at the orchestration layer, not just per-LLM-call.
+- **Parallel tool calls**: when the LLM emits multiple `tool_use` blocks in one turn, execute them concurrently if they're read-only; serialize writes.
+- **Loop detection**: if the same (tool, input) fires N times in a row, or the same tool returns identical output repeatedly, inject a warning into the next tool result; after a hard threshold, force-stop.
+- **Context compaction**: when the transcript approaches the model's context limit, truncate older tool results (keep the task prompt + recent turns + tool_use/tool_result pairing intact).
+- **Transactionality**: actions with user-visible side effects (sending a Discord message, moving a real Google Calendar event) are queued as proposals during the loop and only committed after the loop finishes successfully — or executed immediately if their permission level is `auto_act` and the policy check passes.
+- **Persistence**: every run (chat turn group or proactive trigger) is an `assistant_runs` row with full input snapshot, tool-call trace, token usage, and outcome. Chat turns additionally land in `assistant_messages`.
+- **Resumability**: a stored transcript can seed `initialMessages` on a new run, so a wake-up interrupted by a rate-limit or restart can pick up where it left off.
+
+This same loop is used for **both** chat and proactive wake-ups — the only differences are the trigger, the initial message, and which tools are enabled.
+
 ---
 
 ## 12. Proactive orchestration design
@@ -670,18 +746,29 @@ Trigger occurs
    ↓
 Fetch fresh user state
    ↓
-Run rule-based detectors
+Run rule-based detectors (cheap, deterministic)
    ↓
-If notable state exists, call Monitor/Planner LLM
+If nothing notable → stop (no LLM call)
    ↓
-Generate suggested actions / message
+Open an assistant_runs row, enter the agent action loop (§11.6)
+   with the Monitor/Planner role and its scoped tool set:
+     - read tools to gather additional context as needed
+     - action tools to move tasks, schedule blocks, draft plans
+     - notification tools to propose Discord / website alerts
    ↓
-Decide delivery channel
+Loop exits with a final assistant message + queued side-effects
    ↓
-Send website alert and/or Discord notification
+Apply side-effects per permission level (§20.3):
+   - auto_act: commit now
+   - suggest_and_confirm: persist as pending proposal
+   - read_only: no-op
    ↓
-Log outcome and user response
+Dispatch notifications through the notification policy (§12.5)
+   ↓
+Close assistant_runs row, record outcome + user response
 ```
+
+A proactive trigger is therefore **not** a single LLM call that emits one message — it's a full agent run that may touch several entities before settling.
 
 ## 12.4 Rules before LLM
 To reduce cost and noise, use deterministic rules first.
