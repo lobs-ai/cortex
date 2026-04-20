@@ -1,5 +1,5 @@
 export const fmtTime = (d: Date) =>
-  d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: false });
+  d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true });
 
 export const fmtHM = (d: Date) =>
   `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;

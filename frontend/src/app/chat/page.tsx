@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ChatCard, type ChatMessage } from "@/lib/api";
 import { Icon } from "@/components/Icon";
 
@@ -13,27 +13,60 @@ const SUGGESTIONS = [
   "Plan my tomorrow",
 ];
 
+type ConvSummary = { id: string; lastAt: string; lastText: string; count: number };
+
 export default function ChatPage() {
+  const qc = useQueryClient();
+  const [activeConvId, setActiveConvId] = useState<string | undefined>(undefined);
+  const [bootstrapped, setBootstrapped] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [convId, setConvId] = useState<string | undefined>(undefined);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState<{ text: string; cards: ChatCard[] } | null>(null);
   const streamRef = useRef<HTMLDivElement>(null);
+
+  const { data: conversations } = useQuery<ConvSummary[]>({
+    queryKey: ["chat", "conversations"],
+    queryFn: api.chat.conversations,
+  });
+
+  // On first load open most recent conversation
+  useEffect(() => {
+    if (bootstrapped || !conversations) return;
+    setBootstrapped(true);
+    if (conversations.length > 0) loadConversation(conversations[0].id);
+  }, [conversations, bootstrapped]);
 
   useEffect(() => {
     if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight;
   }, [messages, streaming]);
 
+  const loadConversation = async (id: string) => {
+    setActiveConvId(id);
+    setStreaming(null);
+    const msgs = await api.chat.conversation(id);
+    setMessages(msgs);
+  };
+
+  const newChat = () => {
+    setActiveConvId(undefined);
+    setMessages([]);
+    setStreaming(null);
+  };
+
   const send = useMutation({
-    mutationFn: (text: string) => api.chat.send(text, convId),
-    onSuccess: (res, text) => {
-      setConvId(res.conversationId);
-      setMessages((prev) => [
-        ...prev,
-        { id: crypto.randomUUID(), role: "user", content: text, cards: [] },
-      ]);
-      // Stream characters for feel.
+    mutationFn: (text: string) => api.chat.send(text, activeConvId),
+    onSuccess: (res) => {
+      setActiveConvId(res.conversationId);
+      qc.invalidateQueries({ queryKey: ["chat", "conversations"] });
       const full = res.message.content;
+      const isError = res.message.error === true;
+      if (isError) {
+        setMessages((prev) => [
+          ...prev,
+          { id: res.message.id, role: "assistant", content: full, cards: res.message.cards, error: true },
+        ]);
+        return;
+      }
       let i = 0;
       setStreaming({ text: "", cards: res.message.cards });
       const iv = setInterval(() => {
@@ -42,12 +75,7 @@ export default function ChatPage() {
           clearInterval(iv);
           setMessages((prev) => [
             ...prev,
-            {
-              id: res.message.id,
-              role: "assistant",
-              content: full,
-              cards: res.message.cards,
-            },
+            { id: res.message.id, role: "assistant", content: full, cards: res.message.cards },
           ]);
           setStreaming(null);
         } else {
@@ -55,81 +83,118 @@ export default function ChatPage() {
         }
       }, 28);
     },
+    onError: (err) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: err instanceof Error ? err.message : "Chat request failed.",
+          cards: [],
+          error: true,
+        },
+      ]);
+    },
   });
 
   const onSend = (text: string) => {
     if (!text.trim()) return;
     setInput("");
+    setMessages((prev) => [...prev, { id: crypto.randomUUID(), role: "user", content: text, cards: [] }]);
     send.mutate(text);
   };
 
   return (
-    <div className="chat-layout">
-      <div className="chat-stream" ref={streamRef}>
-        <div className="msg">
-          <div className="role">cortex</div>
-          <div className="body">
-            <p>
-              Morning. I reviewed your state overnight — you&rsquo;re on track overall, but the
-              NeurIPS rebuttal is getting tight. I reserved an 11:00–12:30 deep-work block.
-              Everything else is slotted around your 4 meetings.
-            </p>
-            <div
-              className="caps"
-              style={{ color: "var(--muted-2)", marginTop: 10, fontSize: 10 }}
-            >
-              TRY
-            </div>
-            <div className="row gap-2" style={{ flexWrap: "wrap", marginTop: 6 }}>
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s}
-                  className="btn"
-                  style={{ fontSize: 11.5 }}
-                  onClick={() => onSend(s)}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
+    <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
+      <div className="chat-sidebar">
+        <div className="chat-sidebar-hd">
+          <button className="btn primary" style={{ width: "100%", fontSize: 12 }} onClick={newChat}>
+            + New chat
+          </button>
         </div>
-
-        {messages.map((m) => (
-          <div key={m.id} className={`msg ${m.role === "user" ? "user" : ""}`}>
-            <div className="role">{m.role === "user" ? "you" : "cortex"}</div>
-            <div className="body">
-              <p>{m.content}</p>
-              {m.cards?.map((c, j) => <ChatCardView key={j} card={c} />)}
-            </div>
-          </div>
-        ))}
-
-        {streaming && (
-          <div className="msg">
-            <div className="role">cortex</div>
-            <div className="body">
-              <p>
-                {streaming.text}
-                <span className="cursor" />
-              </p>
-            </div>
-          </div>
-        )}
+        <div className="chat-sidebar-list">
+          {conversations?.map((c) => (
+            <button
+              key={c.id}
+              className={`chat-sidebar-item${c.id === activeConvId ? " active" : ""}`}
+              onClick={() => loadConversation(c.id)}
+            >
+              <div className="chat-sidebar-item-text">{c.lastText || "Chat"}</div>
+              <div className="chat-sidebar-item-date">
+                {new Date(c.lastAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+              </div>
+            </button>
+          ))}
+          {conversations?.length === 0 && (
+            <div className="muted" style={{ padding: 12, fontSize: 11 }}>No past chats</div>
+          )}
+        </div>
       </div>
 
-      <div className="chat-inp">
-        <input
-          placeholder="Ask Cortex — try 'what should i do today?' or '/add task'"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && onSend(input)}
-        />
-        <div className="row gap-2">
-          <span className="mono muted-2" style={{ fontSize: 10.5 }}>⌘K for commands</span>
-          <button className="btn primary" onClick={() => onSend(input)}>
-            <Icon name="send" size={13} />
-          </button>
+      <div className="chat-layout" style={{ flex: 1, overflow: "hidden" }}>
+        <div className="chat-stream" ref={streamRef}>
+          {messages.length === 0 && (
+            <div className="msg">
+              <div className="role">cortex</div>
+              <div className="body">
+                <p>
+                  Hi. I&rsquo;m Cortex — your tasks, calendar, and projects are loaded. Ask me what
+                  to focus on, where to fit a block of work, or what&rsquo;s slipping.
+                </p>
+                <div className="caps" style={{ color: "var(--muted-2)", marginTop: 10, fontSize: 10 }}>TRY</div>
+                <div className="row gap-2" style={{ flexWrap: "wrap", marginTop: 6 }}>
+                  {SUGGESTIONS.map((s) => (
+                    <button key={s} className="btn" style={{ fontSize: 11.5 }} onClick={() => onSend(s)}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {messages.map((m) => (
+            <div key={m.id} className={`msg ${m.role === "user" ? "user" : ""}`}>
+              <div className="role">{m.role === "user" ? "you" : "cortex"}</div>
+              <div className="body">
+                {m.error ? (
+                  <p style={{ color: "var(--danger, #c2410c)", border: "1px solid var(--danger, #c2410c)", borderRadius: 6, padding: "8px 10px", fontSize: 12 }}>
+                    <b>Chat error.</b> {m.content}
+                  </p>
+                ) : (
+                  <p>{m.content}</p>
+                )}
+                {m.cards?.map((c, j) => <ChatCardView key={j} card={c} />)}
+              </div>
+            </div>
+          ))}
+
+          {streaming && (
+            <div className="msg">
+              <div className="role">cortex</div>
+              <div className="body">
+                <p>
+                  {streaming.text}
+                  <span className="cursor" />
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="chat-inp">
+          <input
+            placeholder="Ask Cortex — try 'what should i do today?' or '/add task'"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && onSend(input)}
+          />
+          <div className="row gap-2">
+            <span className="mono muted-2" style={{ fontSize: 10.5 }}>⌘K for commands</span>
+            <button className="btn primary" onClick={() => onSend(input)}>
+              <Icon name="send" size={13} />
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -152,13 +217,9 @@ function ChatCardView({ card }: { card: ChatCard }) {
         <div className="bd">
           {card.blocks.map((b, i) => (
             <div key={i} className="block-row">
-              <span className="mono num">
-                {b.start}–{b.end}
-              </span>
+              <span className="mono num">{b.start}–{b.end}</span>
               <span>{b.label}</span>
-              <button className="btn ghost" style={{ fontSize: 10.5, height: 20 }}>
-                adjust
-              </button>
+              <button className="btn ghost" style={{ fontSize: 10.5, height: 20 }}>adjust</button>
             </div>
           ))}
         </div>

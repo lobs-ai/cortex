@@ -4,7 +4,7 @@ import { z } from "zod";
 import { db, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
 import { currentUser } from "../lib/user.js";
-import { chatReply } from "../ai/chat.js";
+import { ChatError, chatReply, type ChatReply } from "../ai/chat.js";
 
 export async function chatRoutes(app: FastifyInstance) {
   app.get("/api/chat/conversations", async (req) => {
@@ -40,13 +40,17 @@ export async function chatRoutes(app: FastifyInstance) {
         ),
       )
       .orderBy(asc(schema.assistantMessages.createdAt));
-    return rows.map((r) => ({
-      id: r.id,
-      role: r.role,
-      content: r.content,
-      cards: r.cardsJson ? JSON.parse(r.cardsJson) : [],
-      createdAt: r.createdAt,
-    }));
+    return rows.map((r) => {
+      const meta = r.metadataJson ? (JSON.parse(r.metadataJson) as { error?: boolean }) : null;
+      return {
+        id: r.id,
+        role: r.role,
+        content: r.content,
+        cards: r.cardsJson ? JSON.parse(r.cardsJson) : [],
+        createdAt: r.createdAt,
+        error: meta?.error === true,
+      };
+    });
   });
 
   app.post("/api/chat", async (req) => {
@@ -84,7 +88,22 @@ export async function chatRoutes(app: FastifyInstance) {
     });
 
     const history = prior.map((p) => ({ role: p.role, content: p.content }));
-    const reply = await chatReply(u.id, body.text, history);
+
+    let reply: ChatReply;
+    let isError = false;
+    try {
+      reply = await chatReply(u.id, body.text, history);
+    } catch (err) {
+      isError = true;
+      const message =
+        err instanceof ChatError
+          ? err.message
+          : err instanceof Error
+            ? `Chat failed: ${err.message}`
+            : "Chat failed: unknown error";
+      req.log.error({ err }, "chatReply failed");
+      reply = { text: message, cards: [] };
+    }
 
     const replyId = newId("m");
     await db.insert(schema.assistantMessages).values({
@@ -94,6 +113,7 @@ export async function chatRoutes(app: FastifyInstance) {
       role: "assistant",
       content: reply.text,
       cardsJson: JSON.stringify(reply.cards),
+      metadataJson: isError ? JSON.stringify({ error: true }) : null,
       createdAt: new Date(),
     });
 
@@ -104,6 +124,7 @@ export async function chatRoutes(app: FastifyInstance) {
         role: "assistant",
         content: reply.text,
         cards: reply.cards,
+        error: isError,
       },
     };
   });

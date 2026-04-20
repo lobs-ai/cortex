@@ -160,7 +160,7 @@ function HourColumn() {
     <div className="hours">
       {HOURS.map((h) => (
         <div key={h} className="hour" style={{ height: HOUR_PX }}>
-          {String(h).padStart(2, "0")}:00
+          {h === 0 ? "12 AM" : h < 12 ? `${h} AM` : h === 12 ? "12 PM" : `${h - 12} PM`}
         </div>
       ))}
     </div>

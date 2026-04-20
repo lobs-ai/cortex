@@ -127,7 +127,7 @@ export function Shell({ children }: { children: ReactNode }) {
                   day: "numeric",
                   hour: "numeric",
                   minute: "2-digit",
-                  hour12: false,
+                  hour12: true,
                 })
               : ""}
           </div>

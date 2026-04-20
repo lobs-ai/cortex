@@ -49,6 +49,38 @@ const PATCH_BODY = z.object({
   refreshToken: z.string().nullable().optional(),
 });
 
+const OAUTH_PROVIDERS = new Set(["google", "gmail", "google_drive", "google_calendar"]);
+
+async function upsertIntegrationStatus(
+  userId: string,
+  provider: string,
+  status: "connected" | "disconnected",
+) {
+  const [existing] = await db
+    .select()
+    .from(schema.integrations)
+    .where(
+      and(eq(schema.integrations.userId, userId), eq(schema.integrations.provider, provider)),
+    );
+  if (existing) {
+    await db
+      .update(schema.integrations)
+      .set({ status, lastSyncedAt: status === "connected" ? new Date() : existing.lastSyncedAt })
+      .where(eq(schema.integrations.id, existing.id));
+  } else if (status === "connected") {
+    await db.insert(schema.integrations).values({
+      id: newId("in"),
+      userId,
+      provider,
+      status,
+      detail: null,
+      accessTokenEncrypted: null,
+      refreshTokenEncrypted: null,
+      lastSyncedAt: new Date(),
+    });
+  }
+}
+
 export async function integrationsManageRoutes(app: FastifyInstance) {
   app.get("/api/integrations", async (req) => {
     const u = currentUser(req);
@@ -146,6 +178,9 @@ export async function integrationsManageRoutes(app: FastifyInstance) {
       .object({ fields: z.record(z.string(), z.string().nullable()) })
       .parse(req.body);
     await setConfig(u.id, provider, body.fields);
+    if (!OAUTH_PROVIDERS.has(provider)) {
+      await upsertIntegrationStatus(u.id, provider, "connected");
+    }
     return { provider, fields: await describeConfig(u.id, provider) };
   });
 
@@ -156,6 +191,9 @@ export async function integrationsManageRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "unknown_provider" });
     }
     await clearConfig(u.id, provider);
+    if (!OAUTH_PROVIDERS.has(provider)) {
+      await upsertIntegrationStatus(u.id, provider, "disconnected");
+    }
     return { ok: true };
   });
 

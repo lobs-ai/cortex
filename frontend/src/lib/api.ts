@@ -157,6 +157,7 @@ export type ChatMessage = {
   content: string;
   cards: ChatCard[];
   createdAt?: string;
+  error?: boolean;
 };
 
 export const api = {
@@ -346,10 +347,16 @@ export const api = {
       }),
   },
   chat: {
+    conversations: () =>
+      req<{ id: string; lastAt: string; lastText: string; count: number }[]>(
+        "/api/chat/conversations",
+      ),
+    conversation: (id: string) =>
+      req<ChatMessage[]>(`/api/chat/conversations/${encodeURIComponent(id)}`),
     send: (text: string, conversationId?: string) =>
       req<{
         conversationId: string;
-        message: { id: string; role: "assistant"; content: string; cards: ChatCard[] };
+        message: { id: string; role: "assistant"; content: string; cards: ChatCard[]; error?: boolean };
       }>("/api/chat", { method: "POST", body: JSON.stringify({ text, conversationId }) }),
   },
   me: () => req<{ id: string; email: string; name: string; timezone: string }>("/api/me"),

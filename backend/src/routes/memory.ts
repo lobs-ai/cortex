@@ -3,7 +3,6 @@ import { z } from "zod";
 import { currentUser } from "../lib/user.js";
 import {
   deleteMemoryItem,
-  listIntegrations,
   listPreferences,
   listTendencies,
   patchTendency,
@@ -37,8 +36,4 @@ export async function memoryRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  app.get("/api/integrations", async (req) => {
-    const u = currentUser(req);
-    return listIntegrations(u.id);
-  });
 }
