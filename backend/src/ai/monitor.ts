@@ -94,6 +94,10 @@ export async function runMonitor(userId: string): Promise<Proposal[]> {
       for (const b of blocks) {
         // Only flag "planned work" blocks, not the meeting echoes of real events.
         if (b.kind !== "block") continue;
+        // Skip when the block was planned for the same activity as the event (e.g.
+        // a task titled "CSE 590 Project Work" scheduled alongside a calendar event of
+        // the same name — they represent the same work, not a conflict).
+        if (sameActivity(ev.title, b.label)) continue;
         const bStart = hmToMinutes(b.start);
         const bEnd = hmToMinutes(b.end);
         if (bEnd <= bStart) continue;
@@ -171,4 +175,22 @@ function hmToMinutes(hm: string): number {
 
 function overlaps(aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
   return aStart < bEnd && bStart < aEnd;
+}
+
+function sameActivity(eventTitle: string, blockLabel: string): boolean {
+  const a = normalizeActivity(eventTitle);
+  const b = normalizeActivity(blockLabel);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function normalizeActivity(s: string): string {
+  // Strip planner suffixes like " — deep work", " - prep", "(draft)" so we compare the underlying activity.
+  return s
+    .toLowerCase()
+    .replace(/\s*[—–-]\s*(deep work|focus|prep|study|work)\b.*$/i, "")
+    .replace(/\s*\([^)]*\)\s*$/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
