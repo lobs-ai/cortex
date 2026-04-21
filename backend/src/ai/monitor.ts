@@ -4,6 +4,8 @@ import { listTasks } from "../services/tasks.js";
 import { createNotification, listActiveNotifications } from "../services/notifications.js";
 import { getLatestPlan } from "../services/plans.js";
 import type { PlanBlock } from "./planner.js";
+import { generateInsights } from "./insights.js";
+import { proposeTasks } from "./proposer.js";
 import { db, schema } from "../db/client.js";
 import { startOfDayInTz, endOfDayInTz, hmInTz } from "../lib/time.js";
 
@@ -17,8 +19,13 @@ type Proposal = {
   relatedId?: string | null;
 };
 
+export type MonitorResult = {
+  notifications: Proposal[];
+  tasksCreated: { id: string; title: string; reason: string }[];
+};
+
 // Deterministic rule-first monitor per design §12.4. LLM upgrade goes here later.
-export async function runMonitor(userId: string): Promise<Proposal[]> {
+export async function runMonitor(userId: string): Promise<MonitorResult> {
   const now = new Date();
   const [userRow] = await db.select().from(schema.users).where(eq(schema.users.id, userId));
   const tz = userRow?.timezone ?? "America/Detroit";
@@ -161,7 +168,65 @@ export async function runMonitor(userId: string): Promise<Proposal[]> {
     });
   }
 
-  return fresh;
+  // Proactive task proposer. Looks at upcoming events + projects + journal
+  // and creates concrete tasks the user hasn't captured yet. Dedupped across
+  // a 14-day window via agent_proposals so tasks don't get re-created after
+  // completion/deletion.
+  let createdTasks: { id: string; title: string; reason: string }[] = [];
+  try {
+    const r = await proposeTasks(userId);
+    createdTasks = r.created;
+    if (createdTasks.length > 0) {
+      const summaryLines = createdTasks.map((t) => `• ${t.title}`).join("\n");
+      await createNotification(userId, {
+        severity: "low",
+        kind: "agent_created_tasks",
+        title: `Cortex added ${createdTasks.length} task${createdTasks.length === 1 ? "" : "s"}`,
+        body: summaryLines.slice(0, 400),
+        actions: ["View tasks", "Dismiss"],
+        relatedObjectType: null,
+        relatedObjectId: null,
+      });
+    }
+  } catch (err) {
+    console.error("task proposer failed:", err);
+  }
+
+  // LLM-backed insights layer (journal + preferences + tendencies + plan).
+  // Stored with kind="insight" and insightKey in relatedObjectId so the
+  // insight module can dedup across the cooldown window.
+  const insights: Proposal[] = [];
+  try {
+    const activeInsightKeys = new Set(
+      existing.filter((n) => n.kind === "insight" && n.relatedId).map((n) => n.relatedId as string),
+    );
+    const raw = await generateInsights(userId);
+    for (const i of raw) {
+      if (activeInsightKeys.has(i.key)) continue;
+      await createNotification(userId, {
+        severity: i.severity,
+        kind: "insight",
+        title: i.title,
+        body: i.body,
+        actions: i.actions,
+        relatedObjectType: "insight",
+        relatedObjectId: i.key,
+      });
+      insights.push({
+        severity: i.severity,
+        kind: "insight",
+        title: i.title,
+        body: i.body,
+        actions: i.actions,
+        relatedType: "insight",
+        relatedId: i.key,
+      });
+    }
+  } catch (err) {
+    console.error("insight layer failed:", err);
+  }
+
+  return { notifications: [...fresh, ...insights], tasksCreated: createdTasks };
 }
 
 function addHours(d: Date, h: number) {

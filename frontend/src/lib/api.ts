@@ -95,7 +95,7 @@ export type Plan = {
   type: string;
   periodStart: string;
   periodEnd: string;
-  content: { summary: string; blocks: PlanBlock[]; generatedAt?: string; inputs?: PlanInputs };
+  content: { summary: string; blocks: PlanBlock[]; generatedAt?: string; inputs?: PlanInputs; fallbackReason?: string };
   generatedBy: string;
   createdAt: string;
 };

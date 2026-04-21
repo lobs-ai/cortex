@@ -270,6 +270,15 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_proposals (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  task_id TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_integration_configs_lookup ON integration_configs (user_id, provider, field);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks (user_id, status);
 CREATE INDEX IF NOT EXISTS idx_events_user_start ON events (user_id, start_time);
@@ -277,6 +286,8 @@ CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications (user
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON assistant_messages (conversation_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_journal_user_created ON journal_entries (user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_journal_user_event ON journal_entries (user_id, event_id);
+CREATE INDEX IF NOT EXISTS idx_agent_proposals_user_key ON agent_proposals (user_id, source_key);
+CREATE INDEX IF NOT EXISTS idx_agent_proposals_user_created ON agent_proposals (user_id, created_at);
 `;
 
 // Direct run: `npm run db:push` invokes this file via tsx, so do the apply.

@@ -259,6 +259,17 @@ export const journalEntries = sqliteTable("journal_entries", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+// Memory of tasks the agent proactively created. Lets the proposer avoid
+// re-creating the same task even after the user completes or deletes it.
+export const agentProposals = sqliteTable("agent_proposals", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  sourceKey: text("source_key").notNull(),
+  taskId: text("task_id"),
+  reason: text("reason").notNull().default(""),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const scheduledBlocks = sqliteTable("scheduled_blocks", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),

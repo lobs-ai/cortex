@@ -2,7 +2,10 @@ import { eq } from "drizzle-orm";
 import { findFreeBlocks } from "../services/scheduling.js";
 import { listEvents } from "../services/events.js";
 import { listTasks } from "../services/tasks.js";
+import { listEntries } from "../services/journal.js";
+import { listPreferences, listTendencies } from "../services/memory.js";
 import { complete } from "./client.js";
+import { extractJson } from "./jsonExtract.js";
 import { getActiveKey } from "../services/apiKeys.js";
 import { getProvider } from "./registry.js";
 import { getRoleModel } from "../services/settings.js";
@@ -28,6 +31,7 @@ export type DailyPlan = {
   blocks: PlanBlock[];
   generatedBy: string;
   inputs?: PlanInputs;
+  fallbackReason?: string;
 };
 
 export async function generateDailyPlan(
@@ -38,10 +42,14 @@ export async function generateDailyPlan(
   const [userRow] = await db.select().from(schema.users).where(eq(schema.users.id, userId));
   const tz = userRow?.timezone ?? "America/Detroit";
 
-  const [events, tasks, free] = await Promise.all([
+  const last14 = new Date(+date - 14 * 24 * 60 * 60 * 1000);
+  const [events, tasks, free, journal, preferences, tendencies] = await Promise.all([
     listEvents(userId, { from: startOfDayInTz(date, tz), to: endOfDayInTz(date, tz) }),
     listTasks(userId),
     findFreeBlocks(userId, date, { minMinutes: 30, tz }),
+    listEntries(userId, { from: last14, limit: 25 }),
+    listPreferences(userId),
+    listTendencies(userId),
   ]);
 
   const topTasks = tasks
@@ -72,10 +80,24 @@ export async function generateDailyPlan(
 
   const cfg = await getRoleModel(userId, "planner");
   const entry = getProvider(cfg.provider);
-  if (!entry) return { ...heuristicPlan(events, tasks, free, tz), inputs };
+  if (!entry) {
+    return {
+      ...heuristicPlan(events, tasks, free, tz),
+      generatedBy: `planner:heuristic:unknown_provider:${cfg.provider}`,
+      fallbackReason: `Planner provider "${cfg.provider}" is not in the registry. Pick a different provider in Settings → AI Models.`,
+      inputs,
+    };
+  }
   if (entry.requiresApiKey) {
     const key = await getActiveKey(userId, cfg.provider);
-    if (!key) return { ...heuristicPlan(events, tasks, free, tz), inputs };
+    if (!key) {
+      return {
+        ...heuristicPlan(events, tasks, free, tz),
+        generatedBy: `planner:heuristic:no_api_key:${cfg.provider}`,
+        fallbackReason: `No API key on file for ${entry.label}. Add one in Settings → Integrations (or set ${entry.keyEnvVar}) and regenerate the plan.`,
+        inputs,
+      };
+    }
   }
 
   const myEvents = events.filter((e) => !e.subscribed);
@@ -99,6 +121,18 @@ export async function generateDailyPlan(
     })),
     free_blocks: free.map((b) => ({ start: hmInTz(b.start, tz), end: hmInTz(b.end, tz) })),
     tasks: topTasks,
+    preferences: preferences
+      .filter((p) => !p.key.startsWith("llm.role."))
+      .slice(0, 25)
+      .map((p) => ({ key: p.key, value: p.value, confidence: p.confidence })),
+    tendencies: tendencies.slice(0, 12).map((t) => ({ text: t.text, confidence: t.confidence })),
+    recent_journal: journal.slice(0, 20).map((j) => ({
+      kind: j.kind,
+      rating: j.rating,
+      note: j.note,
+      eventId: j.eventId,
+      at: j.createdAt instanceof Date ? j.createdAt.toISOString() : j.createdAt,
+    })),
   };
 
   const guidanceClause = opts?.guidance
@@ -113,9 +147,13 @@ export async function generateDailyPlan(
     "- subscribed_events are from calendars the user is subscribed to but does NOT own (e.g. class calendars listing all staff office hours). The user is not attending these. Do NOT add them as blocks. Do NOT treat them as conflicts. You may reference one in a sub line only if clearly useful (e.g. \"prof's office hours open\").\n" +
     "- Add at most one 'hero' block for the day's highest-priority deep work, marked hero: true.\n" +
     "- Respect the user's free blocks for any new 'block' entries.\n" +
+    "- Honor `preferences` as hard guidance (e.g. schedule.deep_work_window, calendar.default_block_minutes, study.session_length_minutes). High-confidence preferences override defaults.\n" +
+    "- Use `tendencies` as soft signals about when the user works best.\n" +
+    "- Read `recent_journal` for patterns in past reflections: if a block type has been rated ≤2 multiple times (e.g. late-evening deep work), avoid scheduling the same shape today. Reflect the adjustment in the block's `sub` line when it's load-bearing (e.g. \"moved from evening — prior sessions rated 2/5\").\n" +
     "- Keep summary under 160 chars. Return JSON only." +
     guidanceClause;
 
+  let fallbackReason: string | undefined;
   try {
     const result = await complete(userId, cfg.provider, cfg.model, {
       system,
@@ -125,22 +163,29 @@ export async function generateDailyPlan(
       ],
     });
     const text = result?.text ?? "";
-    const jsonStart = text.indexOf("{");
-    const jsonEnd = text.lastIndexOf("}");
-    if (jsonStart >= 0 && jsonEnd > jsonStart) {
-      const parsed = JSON.parse(text.slice(jsonStart, jsonEnd + 1));
+    const extracted = extractJson<{ summary: string; blocks: PlanBlock[] }>(text);
+    if (extracted.ok) {
       return {
-        summary: parsed.summary,
-        blocks: parsed.blocks ?? [],
-        generatedBy: `planner:${cfg.provider}/${cfg.model}`,
+        summary: extracted.value.summary,
+        blocks: extracted.value.blocks ?? [],
+        generatedBy: `planner:${cfg.provider}/${cfg.model}${extracted.repaired ? " (repaired-json)" : ""}`,
         inputs,
       };
     }
+    fallbackReason = `${entry.label} (${cfg.model}) returned unparseable JSON: ${extracted.error}`;
+    console.error("planner LLM JSON parse failed:", extracted.error, "\nraw:", text.slice(0, 500));
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    fallbackReason = `${entry.label} (${cfg.model}) call failed: ${msg.slice(0, 200)}`;
     console.error("planner LLM failure; using heuristic:", err);
   }
 
-  return { ...heuristicPlan(events, tasks, free, tz), inputs };
+  return {
+    ...heuristicPlan(events, tasks, free, tz),
+    generatedBy: `planner:heuristic:llm_error:${cfg.provider}`,
+    fallbackReason,
+    inputs,
+  };
 }
 
 function heuristicPlan(

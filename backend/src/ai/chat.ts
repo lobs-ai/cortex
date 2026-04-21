@@ -1,7 +1,7 @@
 import { completeWithTools, type ToolDef, type ToolHandler } from "./client.js";
 import { getActiveKey } from "../services/apiKeys.js";
 import { getProvider } from "./registry.js";
-import { listTasks, createTask, patchTask, deleteTask } from "../services/tasks.js";
+import { listTasks, createTask, patchTask, deleteTask, getTask } from "../services/tasks.js";
 import { listEvents, createEvent, patchEvent, deleteEvent, rsvpEvent } from "../services/events.js";
 import { listProjects } from "../services/projects.js";
 import { listTendencies, listPreferences, recordPreference } from "../services/memory.js";
@@ -31,6 +31,48 @@ export class ChatError extends Error {
 }
 
 const CHAT_TOOLS: ToolDef[] = [
+  {
+    name: "list_tasks",
+    description:
+      "Re-fetch the user's current task list. Use this when (a) you just created/updated/deleted tasks in this turn and need the fresh state to reason further, (b) the user asks 'what tasks do I have', (c) the context.openTasks was truncated and you need more than the 30 shown initially, or (d) you need to find a task by title that might not be in context.",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["inbox", "today", "doing", "done", "open", "all"],
+          description: "Filter. 'open' returns anything not done. 'all' returns everything. Default: 'open'.",
+        },
+        search: {
+          type: "string",
+          description: "Case-insensitive substring filter on title. Omit for no filter.",
+        },
+        projectId: { type: "string", description: "Restrict to this project" },
+        limit: { type: "number", description: "Max results, default 50" },
+      },
+    },
+  },
+  {
+    name: "get_task",
+    description: "Fetch a single task by ID. Use when you need all fields of a task not fully represented in context.",
+    input_schema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+    },
+  },
+  {
+    name: "list_events",
+    description:
+      "Re-fetch calendar events in a date range. Use after creating/updating/deleting events in this turn, or when the user asks about a range not in context (initial context covers last 14d through 21d out).",
+    input_schema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "ISO-8601 datetime. Defaults to now." },
+        to: { type: "string", description: "ISO-8601 datetime. Defaults to from + 7 days." },
+      },
+    },
+  },
   {
     name: "create_task",
     description: "Create a new task for the user.",
@@ -251,7 +293,13 @@ export async function chatReply(userId: string, userText: string, history: { rol
     "You are Cortex, a personal AI executive assistant. Your job is to help the user get things done — not just advise, but actually act.",
     "",
     "## What you can do",
-    "You have tools to create, update, and delete tasks and calendar events. Use them whenever the user asks you to add, change, or remove something. Don't ask for permission — just do it and confirm concisely.",
+    "You have tools to read, create, update, and delete both tasks and calendar events. Use them whenever the user asks you to add, change, or remove something. Don't ask for permission — just do it and confirm concisely.",
+    "",
+    "## Task & event read tools (use whenever context is stale)",
+    "- context.openTasks is a snapshot taken at the start of this turn and capped at 30 items. If the user is asking about tasks more broadly, use list_tasks to re-fetch (supports status/search/projectId filters).",
+    "- After you create/update/delete a task in this turn, the context is NOT automatically refreshed. If you need to reason about the new state (e.g. 'what do I have now', 'rebalance priorities'), call list_tasks to see the current truth.",
+    "- Same pattern for events: use list_events to pull an arbitrary date range, or after mutating events when you need fresh data.",
+    "- get_task fetches a single task's full fields (description, tags, projectId, timestamps) when the summary in context isn't enough.",
     "",
     "## Core behavior",
     "- Be an executor. When the user asks for something to be done, do it with your tools, then confirm what you did in one sentence.",
@@ -278,10 +326,13 @@ export async function chatReply(userId: string, userText: string, history: { rol
     "",
     "## Learning preferences",
     "- You are expected to get better over time by noticing how the user likes to work and saving that as preferences.",
-    "- Call record_preference whenever the user (a) states a preference directly ('I hate morning meetings', 'default blocks to 90min'), or (b) you can infer one with reasonable confidence from what they just said or from patterns in context.tendencies/recentlyDoneTasks.",
-    "- Reuse the exact `key` already in context.preferences when updating — don't create 'study.time' and 'study_time' as separate entries. Pick stable, lowercase dotted keys like 'schedule.deep_work_window', 'calendar.default_block_minutes', 'comms.tone', 'study.session_length_minutes'.",
+    "- **Default is save-first.** If the user shares anything durable about themselves — a preference, a constraint, a commitment, a goal, a recurring situation, a dislike, a person/place/tool they care about, a deadline context, a health/energy signal — persist it. Silence on a new signal is a bug.",
+    "- Call record_preference whenever the user (a) states a preference directly ('I hate morning meetings', 'default blocks to 90min'), (b) reveals a durable fact ('I'm TA-ing 281 this term', 'I commute Tue/Thu', 'my advisor is Prof. X'), or (c) you can infer one with reasonable confidence from what they just said or from patterns in context.tendencies/recentlyDoneTasks.",
+    "- Non-preference durable context (observations about the user's life, ongoing projects, recent events that aren't calendar items, emotional/energy state) goes into quick_log so it's retrievable later. Prefer record_preference for things that should shape future scheduling decisions; prefer quick_log for narrative context.",
+    "- Reuse the exact `key` already in context.preferences when updating — don't create 'study.time' and 'study_time' as separate entries. Pick stable, lowercase dotted keys like 'schedule.deep_work_window', 'calendar.default_block_minutes', 'comms.tone', 'study.session_length_minutes', 'context.current_term', 'context.advisor'.",
     "- Set source='user' and confidence ~1.0 when they said it explicitly; source='agent' and confidence 0.5–0.8 when you inferred it.",
-    "- Do not narrate that you recorded a preference unless the user asked you to remember it. Just save it silently and act on it.",
+    "- Save silently — do not narrate that you recorded a preference unless the user explicitly asked you to remember something, in which case confirm in one short line ('got it — saved').",
+    "- If the user says 'remember this', 'save this', 'write this down', 'don't forget', or similar — treat it as a hard directive to persist via record_preference (if it's a rule/preference) or quick_log (if it's context/narrative). Never acknowledge without saving.",
     "- Never write keys under the reserved `llm.role.*` namespace — those are model settings, not user preferences.",
     "",
     "## Journaling — reflections and quick logs",
@@ -302,6 +353,44 @@ export async function chatReply(userId: string, userText: string, history: { rol
   ].join("\n");
 
   const toolHandlers: Record<string, ToolHandler> = {
+    list_tasks: async (input) => {
+      const { status, search, projectId, limit } = input as {
+        status?: string;
+        search?: string;
+        projectId?: string;
+        limit?: number;
+      };
+      const all = await listTasks(userId);
+      const needle = search?.trim().toLowerCase();
+      const wanted = status ?? "open";
+      const filtered = all.filter((t) => {
+        if (wanted === "all") {
+          // no status filter
+        } else if (wanted === "open") {
+          if (t.status === "done") return false;
+        } else if (t.status !== wanted) {
+          return false;
+        }
+        if (projectId && t.project !== projectId) return false;
+        if (needle && !t.title.toLowerCase().includes(needle)) return false;
+        return true;
+      });
+      const cap = typeof limit === "number" && limit > 0 ? Math.min(200, Math.round(limit)) : 50;
+      return { tasks: filtered.slice(0, cap), total: filtered.length, truncated: filtered.length > cap };
+    },
+    get_task: async (input) => {
+      const { id } = input as { id: string };
+      const task = await getTask(userId, id);
+      if (!task) return { error: `No task with id ${id}` };
+      return task;
+    },
+    list_events: async (input) => {
+      const { from, to } = input as { from?: string; to?: string };
+      const fromDate = from ? new Date(from) : new Date();
+      const toDate = to ? new Date(to) : new Date(+fromDate + 7 * 24 * 60 * 60 * 1000);
+      const events = await listEvents(userId, { from: fromDate, to: toDate });
+      return { events, count: events.length };
+    },
     create_task: async (input) => {
       const parsed = TaskCreate.parse(input);
       return createTask(userId, parsed);

@@ -22,8 +22,11 @@ export async function notificationRoutes(app: FastifyInstance) {
 
   app.post("/api/notifications/scan", async (req) => {
     const u = currentUser(req);
-    const created = await runMonitor(u.id);
-    return { created: created.length };
+    const result = await runMonitor(u.id);
+    return {
+      created: result.notifications.length,
+      tasksCreated: result.tasksCreated.length,
+    };
   });
 
   app.post("/api/notifications/test-discord", async () => {

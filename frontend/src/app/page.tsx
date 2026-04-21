@@ -346,6 +346,20 @@ function WhyThisModal({ plan, onClose }: { plan: Plan; onClose: () => void }) {
           <div className="muted mono" style={{ fontSize: 10.5 }}>
             {plan.generatedBy} · {plan.content.generatedAt ? fmtRelative(plan.content.generatedAt) : fmtRelative(plan.createdAt)}
           </div>
+          {plan.content.fallbackReason && (
+            <div
+              style={{
+                border: "1px solid var(--warn, #c58a00)",
+                background: "var(--warn-bg, rgba(197,138,0,0.08))",
+                padding: "8px 10px",
+                fontSize: 11.5,
+                lineHeight: 1.4,
+              }}
+            >
+              <div className="caps" style={{ fontSize: 10, marginBottom: 4 }}>planner fell back to heuristic</div>
+              <div>{plan.content.fallbackReason}</div>
+            </div>
+          )}
           {inputs?.guidance && (
             <div style={{ border: "1px solid var(--hair-2)", padding: "6px 8px", fontSize: 12 }}>
               <div className="caps" style={{ fontSize: 10 }}>your guidance</div>

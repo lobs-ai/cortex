@@ -14,11 +14,19 @@ import { createNotification, listActiveNotifications } from "./services/notifica
 async function monitorTick() {
   const startedAt = new Date();
   let status: "ok" | "error" = "ok";
-  let createdCount = 0;
+  let notificationCount = 0;
+  let taskCount = 0;
   try {
-    const created = await runMonitor(DEMO_USER_ID);
-    createdCount = created.length;
-    if (createdCount > 0) console.log(`monitor: ${createdCount} new notifications`);
+    const result = await runMonitor(DEMO_USER_ID);
+    notificationCount = result.notifications.length;
+    taskCount = result.tasksCreated.length;
+    if (notificationCount > 0) console.log(`monitor: ${notificationCount} new notifications`);
+    if (taskCount > 0) {
+      console.log(`monitor: ${taskCount} new tasks proactively created`);
+      // The plan the user is looking at was generated with an older task list.
+      // Regenerate so the new tasks land in the hero/deep-work slots.
+      await autoRefreshPlan();
+    }
   } catch (err) {
     status = "error";
     console.error("monitor error:", err);
@@ -33,7 +41,10 @@ async function monitorTick() {
       startedAt,
       finishedAt,
       status,
-      outputJson: JSON.stringify({ notificationsCreated: createdCount }),
+      outputJson: JSON.stringify({
+        notificationsCreated: notificationCount,
+        tasksCreated: taskCount,
+      }),
     });
   } catch (err) {
     console.error("failed to record monitor run:", err);

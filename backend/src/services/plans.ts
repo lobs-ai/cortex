@@ -2,6 +2,7 @@ import { and, desc, eq, gte, lte } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
 import { generateDailyPlan, type DailyPlan } from "../ai/planner.js";
+import { createNotification, listActiveNotifications } from "./notifications.js";
 
 export async function persistPlan(userId: string, type: "daily" | "weekly", fresh: DailyPlan) {
   const now = new Date();
@@ -37,6 +38,24 @@ export async function regenerateDailyPlan(
   opts?: { guidance?: string },
 ) {
   const fresh = await generateDailyPlan(userId, date, opts);
+  if (fresh.fallbackReason) {
+    // Surface planner failures so they aren't invisible. Dedup so the user
+    // isn't spammed every worker tick while the underlying issue persists.
+    const active = await listActiveNotifications(userId);
+    const already = active.find(
+      (n) => n.kind === "planner_fallback" && n.body === fresh.fallbackReason,
+    );
+    if (!already) {
+      await createNotification(userId, {
+        severity: "med",
+        kind: "planner_fallback",
+        title: "Planner fell back to heuristic",
+        body: fresh.fallbackReason,
+        actions: ["Open settings"],
+        category: "system",
+      });
+    }
+  }
   return persistPlan(userId, "daily", fresh);
 }
 
