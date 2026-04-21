@@ -33,13 +33,13 @@ commands:
   stop        stop containers but keep volumes (pg data stays)
   restart     stop + start
   rebuild     force a fresh image build, then start
-  logs [svc]  tail logs — optionally for one service (app, postgres, redis, worker)
+  logs [svc]  tail logs — optionally for one service (app, postgres)
   ps          show running services
   shell       open a shell inside the app container
-  clean       stop + remove containers AND volumes (destroys postgres/redis data)
+  clean       stop + remove containers AND volumes (destroys postgres data)
   help        show this
 
-services (per docker-compose.yml): app, worker, postgres, redis
+services (per docker-compose.yml): app, postgres
 EOF
 }
 
@@ -49,7 +49,7 @@ shift || true
 case "$cmd" in
   start)
     ensure_env
-    dc up -d --build
+    dc up -d --build --remove-orphans
     dc ps
     ;;
   stop)
@@ -82,7 +82,7 @@ case "$cmd" in
     dc exec app /bin/sh
     ;;
   clean)
-    read -r -p "This will delete postgres + redis volumes. Continue? [y/N] " ans
+    read -r -p "This will delete postgres volume. Continue? [y/N] " ans
     case "$ans" in
       y|Y|yes) dc down -v ;;
       *) echo "aborted" ;;

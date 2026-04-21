@@ -6,8 +6,6 @@ services:
     restart: unless-stopped
     env_file: ../.env
     environment:
-      # Force production regardless of .env — the prod image ships the
-      # prebuilt Next bundle and doesn't carry dev-mode loaders.
       CORTEX_ENV: "production"
       NODE_ENV: "production"
       PORT: "9009"
@@ -16,17 +14,26 @@ services:
       - cortexdata:/data
     ports:
       - "9009:9009"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
-  worker:
-    build:
-      context: ..
-      dockerfile: infra/docker/worker.Dockerfile
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
     env_file: ../.env
     environment:
-      CORTEX_DB_PATH: /data/cortex.db
+      POSTGRES_USER: ${POSTGRES_USER:-cortex}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cortex}
+      POSTGRES_DB: ${POSTGRES_DB:-cortex}
     volumes:
-      - cortexdata:/data
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cortex} -d ${POSTGRES_DB:-cortex}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   cortexdata: {}
+  pgdata: {}
