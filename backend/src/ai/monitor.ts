@@ -1,7 +1,11 @@
 import { eq } from "drizzle-orm";
 import { listEvents } from "../services/events.js";
 import { listTasks } from "../services/tasks.js";
-import { createNotification, listActiveNotifications } from "../services/notifications.js";
+import {
+  createNotification,
+  listRecentNotifications,
+  type NotificationAction,
+} from "../services/notifications.js";
 import { getLatestPlan } from "../services/plans.js";
 import type { PlanBlock } from "./planner.js";
 import { generateInsights } from "./insights.js";
@@ -14,10 +18,28 @@ type Proposal = {
   kind: string;
   title: string;
   body: string;
-  actions?: string[];
+  actions?: NotificationAction[];
   relatedType?: string | null;
   relatedId?: string | null;
 };
+
+// How long to wait before re-firing the same (kind, relatedId) after the
+// user last saw it. Dismissed/acted signals always cost at least this long
+// — the rule condition may still be true, but the user already heard about
+// it and hiding-then-refiring is the bug we're fixing.
+const RULE_COOLDOWN_MS: Record<string, number> = {
+  deadline_risk: 12 * 60 * 60 * 1000, // 12h
+  prep: 6 * 60 * 60 * 1000, // 6h
+  backlog: 24 * 60 * 60 * 1000, // daily
+  block_conflict: 4 * 60 * 60 * 1000,
+  hero_shrunk: 4 * 60 * 60 * 1000,
+  agent_created_tasks: 24 * 60 * 60 * 1000,
+  insight: 7 * 24 * 60 * 60 * 1000, // a week — insights are the noisiest repeat offenders
+};
+const DEFAULT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+// How far back to scan when computing "did we already surface this?".
+const SUPPRESSION_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 
 export type MonitorResult = {
   notifications: Proposal[];
@@ -31,16 +53,38 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
   const tz = userRow?.timezone ?? "America/Detroit";
   const todayStart = startOfDayInTz(now, tz);
   const todayEnd = endOfDayInTz(now, tz);
-  const [tasks, events, existing, plan, todaysEvents] = await Promise.all([
-    listTasks(userId),
+  const suppressionCutoff = new Date(+now - SUPPRESSION_WINDOW_MS);
+  const [openTasks, events, recentHistory, plan, todaysEvents] = await Promise.all([
+    listTasks(userId, { openOnly: true }),
     listEvents(userId, { from: now, to: addHours(now, 48) }),
-    listActiveNotifications(userId),
+    listRecentNotifications(userId, suppressionCutoff),
     getLatestPlan(userId, "daily"),
     listEvents(userId, { from: todayStart, to: todayEnd }),
   ]);
 
-  const open = tasks.filter((t) => t.status !== "done");
+  const open = openTasks;
   const proposals: Proposal[] = [];
+
+  // Build a suppression map: (kind, relatedId) → most recent "we already
+  // told the user about this" timestamp. Active notifications count too —
+  // we still want to avoid duplicating a card that's already on screen.
+  const lastSeen = new Map<string, number>();
+  for (const n of recentHistory) {
+    const key = `${n.kind}:${n.relatedId ?? ""}`;
+    const stamp = Math.max(
+      +n.createdAt,
+      n.dismissedAt ? +n.dismissedAt : 0,
+      n.actedAt ? +n.actedAt : 0,
+    );
+    const prev = lastSeen.get(key) ?? 0;
+    if (stamp > prev) lastSeen.set(key, stamp);
+  }
+  const suppressed = (kind: string, relatedId: string | null | undefined) => {
+    const last = lastSeen.get(`${kind}:${relatedId ?? ""}`);
+    if (!last) return false;
+    const cooldown = RULE_COOLDOWN_MS[kind] ?? DEFAULT_COOLDOWN_MS;
+    return +now - last < cooldown;
+  };
 
   // deadline_risk — any task due within 24h with P0/P1
   for (const t of open) {
@@ -52,7 +96,11 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
         kind: "deadline_risk",
         title: `${t.title} due in ${Math.round(hoursLeft)}h`,
         body: `Priority ${t.priority}. Estimated ${t.estMin ?? "?"}m of work remaining.`,
-        actions: ["Schedule block", "Show plan", "Dismiss"],
+        actions: [
+          { label: "Schedule block", op: "schedule_block" },
+          { label: "Show plan", op: "show_plan" },
+          { label: "Dismiss", op: "dismiss" },
+        ],
         relatedType: "task",
         relatedId: t.id,
       });
@@ -69,7 +117,10 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
         kind: "prep",
         title: `${e.title} in ${Math.round(hoursUntil * 60)}m — no prep block`,
         body: "You usually prep for 30m. Want me to reserve time?",
-        actions: ["Reserve prep", "Skip this time"],
+        actions: [
+          { label: "Reserve prep", op: "reserve_prep" },
+          { label: "Skip this time", op: "dismiss" },
+        ],
         relatedType: "event",
         relatedId: e.id,
       });
@@ -84,7 +135,10 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
       kind: "backlog",
       title: `${overdue.length} overdue tasks`,
       body: `Oldest: "${overdue[0].title}". Want to triage them now?`,
-      actions: ["Triage", "Snooze"],
+      actions: [
+        { label: "Triage", op: "triage_overdue" },
+        { label: "Snooze 1h", op: "snooze_1h" },
+      ],
       relatedType: null,
       relatedId: null,
     });
@@ -114,7 +168,10 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
             kind: "block_conflict",
             title: `"${ev.title}" conflicts with ${b.hero ? "your focus block" : b.label}`,
             body: `${b.start}–${b.end} was reserved for ${b.label}. ${ev.title} now overlaps.`,
-            actions: ["Reschedule block", "Regenerate plan"],
+            actions: [
+              { label: "Reschedule block", op: "reschedule_block" },
+              { label: "Regenerate plan", op: "regenerate_plan" },
+            ],
             relatedType: "event",
             relatedId: ev.id,
           });
@@ -144,7 +201,10 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
           kind: "hero_shrunk",
           title: `Focus window down to ${Math.max(0, Math.round(usable))}m`,
           body: `Planned ${planned}m for "${hero.label}". Want Cortex to find a fresh block?`,
-          actions: ["Regenerate plan"],
+          actions: [
+            { label: "Regenerate plan", op: "regenerate_plan" },
+            { label: "Dismiss", op: "dismiss" },
+          ],
           relatedType: null,
           relatedId: null,
         });
@@ -152,9 +212,9 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
     }
   }
 
-  // dedup against existing active notifications (same kind + relatedId)
-  const seen = new Set(existing.map((n) => `${n.kind}:${n.relatedId ?? ""}`));
-  const fresh = proposals.filter((p) => !seen.has(`${p.kind}:${p.relatedId ?? ""}`));
+  // Suppress anything we already showed the user inside the per-kind cooldown
+  // window (active, dismissed, acted on, or snoozed — all count).
+  const fresh = proposals.filter((p) => !suppressed(p.kind, p.relatedId));
 
   for (const p of fresh) {
     await createNotification(userId, {
@@ -183,7 +243,10 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
         kind: "agent_created_tasks",
         title: `Cortex added ${createdTasks.length} task${createdTasks.length === 1 ? "" : "s"}`,
         body: summaryLines.slice(0, 400),
-        actions: ["View tasks", "Dismiss"],
+        actions: [
+          { label: "View tasks", op: "view_tasks" },
+          { label: "Dismiss", op: "dismiss" },
+        ],
         relatedObjectType: null,
         relatedObjectId: null,
       });
@@ -193,16 +256,14 @@ export async function runMonitor(userId: string): Promise<MonitorResult> {
   }
 
   // LLM-backed insights layer (journal + preferences + tendencies + plan).
-  // Stored with kind="insight" and insightKey in relatedObjectId so the
-  // insight module can dedup across the cooldown window.
+  // Stored with kind="insight" and insightKey in relatedObjectId. Suppressed
+  // by the same cooldown map — if the user saw "evening_study_low_ratings"
+  // in the past week (dismissed or not), don't refire it.
   const insights: Proposal[] = [];
   try {
-    const activeInsightKeys = new Set(
-      existing.filter((n) => n.kind === "insight" && n.relatedId).map((n) => n.relatedId as string),
-    );
     const raw = await generateInsights(userId);
     for (const i of raw) {
-      if (activeInsightKeys.has(i.key)) continue;
+      if (suppressed("insight", i.key)) continue;
       await createNotification(userId, {
         severity: i.severity,
         kind: "insight",

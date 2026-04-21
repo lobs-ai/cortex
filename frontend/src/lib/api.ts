@@ -60,18 +60,31 @@ export type Project = {
   lastActivity: string | null;
 };
 
+export type AlertAction = { label: string; op: string };
+
 export type Alert = {
   id: string;
   severity: "high" | "med" | "low";
   kind: string;
   title: string;
   body: string;
-  actions: string[];
+  actions: AlertAction[];
   relatedType: string | null;
   relatedId: string | null;
   createdAt: string;
   readAt: string | null;
   dismissedAt: string | null;
+  actedAt: string | null;
+  actionOp: string | null;
+  snoozedUntil: string | null;
+};
+
+export type NotificationActResult = {
+  ok: true;
+  op: string;
+  snoozedUntil: string | null;
+  dismissed: boolean;
+  effect: { kind: string; to?: string; taskId?: string; reason?: string };
 };
 
 export type PlanBlock = {
@@ -272,6 +285,11 @@ export const api = {
     list: () => req<Alert[]>("/api/notifications"),
     dismiss: (id: string) =>
       req<{ ok: boolean }>(`/api/notifications/${id}/dismiss`, { method: "POST" }),
+    act: (id: string, op: string) =>
+      req<NotificationActResult>(`/api/notifications/${id}/act`, {
+        method: "POST",
+        body: JSON.stringify({ op }),
+      }),
     scan: () => req<{ created: number }>("/api/notifications/scan", { method: "POST" }),
   },
   journal: {

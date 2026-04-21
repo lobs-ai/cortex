@@ -6,23 +6,25 @@ import { getActiveKey } from "../services/apiKeys.js";
 import { getProvider } from "./registry.js";
 import { getRoleModel } from "../services/settings.js";
 import { listEvents } from "../services/events.js";
-import { listTasks } from "../services/tasks.js";
+import { summarizeTasks } from "../services/tasks.js";
 import { listEntries, listEventsAwaitingReflection } from "../services/journal.js";
 import { listPreferences, listTendencies } from "../services/memory.js";
 import { getLatestPlan } from "../services/plans.js";
 import { hmInTz } from "../lib/time.js";
+import type { NotificationAction } from "../services/notifications.js";
 
 export type Insight = {
   severity: "high" | "med" | "low";
   title: string;
   body: string;
   key: string; // stable dedup key, e.g. "evening_study_low_ratings"
-  actions?: string[];
+  actions?: NotificationAction[];
 };
 
 // Cooldown window — don't refire the same insight key inside this window even
-// if the prior notification was dismissed.
-export const INSIGHT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// if the prior notification was dismissed. Extended from 24h to 7d because
+// the old value let "repeated low evening study" re-fire every day.
+export const INSIGHT_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 
 // LLM-backed proactive insight layer. Reads reflections, preferences, learned
 // tendencies, the current plan, and recent activity, then proposes 0–2 concrete
@@ -44,14 +46,14 @@ export async function generateInsights(userId: string): Promise<Insight[]> {
   const last3 = new Date(+now - 3 * 24 * 60 * 60 * 1000);
   const in72h = new Date(+now + 72 * 60 * 60 * 1000);
 
-  const [journal, preferences, tendencies, plan, upcoming, tasks, awaitingReflection, recentInsights] =
+  const [journal, preferences, tendencies, plan, upcoming, taskDigest, awaitingReflection, recentInsights] =
     await Promise.all([
       listEntries(userId, { from: last14, limit: 40 }),
       listPreferences(userId),
       listTendencies(userId),
       getLatestPlan(userId, "daily"),
       listEvents(userId, { from: now, to: in72h }),
-      listTasks(userId),
+      summarizeTasks(userId),
       listEventsAwaitingReflection(userId, last3),
       recentInsightKeys(userId),
     ]);
@@ -59,7 +61,6 @@ export async function generateInsights(userId: string): Promise<Insight[]> {
   // Nothing meaningful to reason over — skip the LLM call.
   if (journal.length === 0 && preferences.length === 0 && tendencies.length === 0) return [];
 
-  const openTasks = tasks.filter((t) => t.status !== "done").slice(0, 20);
   const ctx = {
     now: hmInTz(now, tz),
     timezone: tz,
@@ -79,12 +80,7 @@ export async function generateInsights(userId: string): Promise<Insight[]> {
       .filter((e) => !e.subscribed)
       .slice(0, 20)
       .map((e) => ({ title: e.title, start: e.start.toISOString(), kind: e.kind, important: !!e.important })),
-    openTasks: openTasks.map((t) => ({
-      title: t.title,
-      priority: t.priority,
-      due: t.due ? t.due.toISOString() : null,
-      estMin: t.estMin,
-    })),
+    tasks: taskDigest,
     journal: journal.map((j) => ({
       kind: j.kind,
       rating: j.rating,
@@ -108,7 +104,8 @@ export async function generateInsights(userId: string): Promise<Insight[]> {
     "- Non-obvious — don't restate a task's due date or that a meeting is soon. Those are covered by rule-based alerts.",
     "",
     "## Suppression",
-    "- NEVER emit an insight whose `key` appears in recentInsightKeys — it was already surfaced in the last 24h.",
+    "- NEVER emit an insight whose `key` appears in recentInsightKeys — the user saw that insight in the past 7 days (whether they acted on it or dismissed it). Repeating it is worse than silence.",
+    "- If you can only come up with a near-rewording of a recent key, return nothing. The user would see through it.",
     "- If you have no strong observation, return an empty array. Silence is better than noise.",
     "",
     "## Output",
@@ -139,7 +136,18 @@ export async function generateInsights(userId: string): Promise<Insight[]> {
         title: String(i.title ?? "").slice(0, 120),
         body: String(i.body ?? "").slice(0, 280),
         key: i.key.toLowerCase().replace(/[^a-z0-9_]+/g, "_").slice(0, 48),
-        actions: Array.isArray(i.actions) ? i.actions.slice(0, 2).map(String) : undefined,
+        actions: Array.isArray(i.actions)
+          ? i.actions
+              .slice(0, 2)
+              .map((a): NotificationAction | null => {
+                if (typeof a === "string") return { label: a, op: "dismiss" };
+                if (a && typeof a === "object" && typeof a.label === "string") {
+                  return { label: a.label, op: typeof a.op === "string" ? a.op : "dismiss" };
+                }
+                return null;
+              })
+              .filter((a): a is NotificationAction => a !== null)
+          : undefined,
       }));
   } catch (err) {
     console.error("insights generation failed:", err);
@@ -147,8 +155,10 @@ export async function generateInsights(userId: string): Promise<Insight[]> {
   }
 }
 
-// Insight keys we've surfaced within the cooldown window. Used both as dedup
-// and as an LLM-side instruction to avoid re-proposing the same observation.
+// Insight keys we've surfaced within the cooldown window — regardless of
+// whether the user dismissed, acted on, or snoozed the notification. Passed
+// to the LLM as recentInsightKeys so it knows not to re-derive them in new
+// words, and also used as a server-side belt-and-braces filter.
 async function recentInsightKeys(userId: string): Promise<string[]> {
   const cutoff = new Date(Date.now() - INSIGHT_COOLDOWN_MS);
   const rows = await db

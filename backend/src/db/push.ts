@@ -5,6 +5,19 @@ import { rawDb } from "./client.js";
 // db:push` still works thanks to the side-effect call at the bottom.
 export function applySchema(): void {
   rawDb.exec(DDL);
+  // Additive columns on pre-existing databases — SQLite has no
+  // "ADD COLUMN IF NOT EXISTS", so we swallow the duplicate-column error.
+  addColumnIfMissing("notifications", "acted_at", "INTEGER");
+  addColumnIfMissing("notifications", "action_op", "TEXT");
+  addColumnIfMissing("notifications", "snoozed_until", "INTEGER");
+}
+
+function addColumnIfMissing(table: string, column: string, definition: string) {
+  try {
+    rawDb.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch {
+    // column already exists — ignore
+  }
 }
 
 const DDL = `
@@ -119,6 +132,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   delivered_at INTEGER,
   read_at INTEGER,
   dismissed_at INTEGER,
+  acted_at INTEGER,
+  action_op TEXT,
+  snoozed_until INTEGER,
   related_object_type TEXT,
   related_object_id TEXT,
   created_at INTEGER NOT NULL

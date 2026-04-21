@@ -247,9 +247,12 @@ export async function chatReply(userId: string, userText: string, history: { rol
     }
   }
 
+  // Narrowed to open + last 7 days of done. `list_tasks` is still available
+  // as a tool when the model actually needs the full set — see CHAT_TOOLS.
+  const taskCutoff = inDays(-7);
   const [[userRow], tasks, pastEvents, upcomingEvents, projects, tendencies, preferences, recentJournal, awaitingReflection] = await Promise.all([
     db.select().from(schema.users).where(eq(schema.users.id, userId)),
-    listTasks(userId),
+    listTasks(userId, { includeDoneSince: taskCutoff }),
     listEvents(userId, { from: inDays(-14), to: startOfToday() }),
     listEvents(userId, { from: startOfToday(), to: inDays(21) }),
     listProjects(userId),

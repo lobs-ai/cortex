@@ -1,7 +1,8 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { api, type NotificationActResult } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
 import { Chip } from "./Primitives";
 import { Icon } from "./Icon";
@@ -9,14 +10,33 @@ import { Markdown } from "./Markdown";
 
 export function RightRail() {
   const qc = useQueryClient();
+  const router = useRouter();
   const { data: alerts = [] } = useQuery({
     queryKey: ["notifications"],
     queryFn: () => api.notifications.list(),
     refetchInterval: 60_000,
   });
 
-  const dismiss = useMutation({
-    mutationFn: (id: string) => api.notifications.dismiss(id),
+  const act = useMutation({
+    mutationFn: ({ id, op }: { id: string; op: string }) => api.notifications.act(id, op),
+    onSuccess: (result: NotificationActResult) => {
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      // The backend tells us what happened so the UI can follow through —
+      // navigate, refresh plan, etc. Keeps the mapping server-driven.
+      if (result.effect?.kind === "navigate" && result.effect.to) {
+        router.push(result.effect.to);
+      }
+      if (result.effect?.kind === "plan_regenerated" || result.effect?.kind === "task_queued_for_today") {
+        qc.invalidateQueries({ queryKey: ["plan"] });
+        qc.invalidateQueries({ queryKey: ["tasks"] });
+      }
+    },
+  });
+
+  const snoozeAll = useMutation({
+    mutationFn: async ({ op }: { op: string }) => {
+      await Promise.all(alerts.map((a) => api.notifications.act(a.id, op)));
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
   });
 
@@ -48,7 +68,7 @@ export function RightRail() {
             <button
               className="btn ghost"
               style={{ padding: "0 4px", height: 18 }}
-              onClick={() => dismiss.mutate(a.id)}
+              onClick={() => act.mutate({ id: a.id, op: "dismiss" })}
             >
               <Icon name="x" size={11} />
             </button>
@@ -56,14 +76,15 @@ export function RightRail() {
           <div className="alert-title">{a.title}</div>
           <div className="alert-body"><Markdown>{a.body}</Markdown></div>
           <div className="alert-actions">
-            {a.actions.map((act, i) => (
+            {a.actions.map((action, i) => (
               <button
                 key={i}
                 className={`btn ${i === 0 ? "primary" : "ghost"}`}
                 style={{ fontSize: 11 }}
-                onClick={() => dismiss.mutate(a.id)}
+                onClick={() => act.mutate({ id: a.id, op: action.op })}
+                disabled={act.isPending}
               >
-                {act}
+                {action.label}
               </button>
             ))}
           </div>
@@ -84,9 +105,30 @@ export function RightRail() {
       >
         <div className="caps">Snooze proactive</div>
         <div className="row gap-2">
-          <button className="btn" style={{ fontSize: 11 }}>1h</button>
-          <button className="btn" style={{ fontSize: 11 }}>rest of day</button>
-          <button className="btn" style={{ fontSize: 11 }}>until tmr</button>
+          <button
+            className="btn"
+            style={{ fontSize: 11 }}
+            disabled={alerts.length === 0 || snoozeAll.isPending}
+            onClick={() => snoozeAll.mutate({ op: "snooze_1h" })}
+          >
+            1h
+          </button>
+          <button
+            className="btn"
+            style={{ fontSize: 11 }}
+            disabled={alerts.length === 0 || snoozeAll.isPending}
+            onClick={() => snoozeAll.mutate({ op: "snooze_rest_of_day" })}
+          >
+            rest of day
+          </button>
+          <button
+            className="btn"
+            style={{ fontSize: 11 }}
+            disabled={alerts.length === 0 || snoozeAll.isPending}
+            onClick={() => snoozeAll.mutate({ op: "snooze_tomorrow" })}
+          >
+            until tmr
+          </button>
         </div>
       </div>
     </div>

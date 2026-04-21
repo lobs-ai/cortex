@@ -6,10 +6,11 @@ import { getActiveKey } from "../services/apiKeys.js";
 import { getProvider } from "./registry.js";
 import { getRoleModel } from "../services/settings.js";
 import { listEvents } from "../services/events.js";
-import { createTask, listTasks } from "../services/tasks.js";
+import { createTask, listTasks, summarizeTasks } from "../services/tasks.js";
 import { listProjects } from "../services/projects.js";
 import { listEntries } from "../services/journal.js";
 import { listPreferences, listTendencies } from "../services/memory.js";
+import { listRecentNotifications } from "../services/notifications.js";
 import { TaskCreate } from "../schemas/tasks.js";
 
 export type ProposedTask = {
@@ -51,20 +52,25 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
   const last14 = new Date(+now - 14 * 24 * 60 * 60 * 1000);
   const in21d = new Date(+now + 21 * 24 * 60 * 60 * 1000);
 
-  const [tasks, events, projects, journal, preferences, tendencies, recentKeys] = await Promise.all([
-    listTasks(userId),
-    listEvents(userId, { from: now, to: in21d }),
-    listProjects(userId),
-    listEntries(userId, { from: last14, limit: 30 }),
-    listPreferences(userId),
-    listTendencies(userId),
-    recentProposalKeys(userId),
-  ]);
+  const [taskDigest, openTasksRaw, events, projects, journal, preferences, tendencies, recentKeys, recentNotifications] =
+    await Promise.all([
+      summarizeTasks(userId, { openLimit: 30, recentDoneDays: 14, recentDoneLimit: 20 }),
+      listTasks(userId, { openOnly: true }),
+      listEvents(userId, { from: now, to: in21d }),
+      listProjects(userId),
+      listEntries(userId, { from: last14, limit: 30 }),
+      listPreferences(userId),
+      listTendencies(userId),
+      recentProposalKeys(userId),
+      listRecentNotifications(userId, last14),
+    ]);
 
-  const openTasks = tasks.filter((t) => t.status !== "done");
-  const recentDone = tasks.filter(
-    (t) => t.status === "done" && t.completedAt && +t.completedAt > +last14,
-  );
+  // Titles the user has already seen in the proactive rail recently. We
+  // include both dismissed and acted-on ones because either way the user
+  // knows about it and doesn't need a reworded repeat.
+  const recentlyShownNotificationTitles = recentNotifications
+    .slice(0, 30)
+    .map((n) => n.title);
 
   const ctx = {
     nowIso: now.toISOString(),
@@ -84,14 +90,7 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
     activeProjects: projects
       .filter((p) => p.status === "active")
       .map((p) => ({ id: p.id, name: p.name, description: p.description, targetDate: p.targetDate })),
-    openTasks: openTasks.map((t) => ({
-      title: t.title,
-      priority: t.priority,
-      due: t.due ? t.due.toISOString() : null,
-      status: t.status,
-      projectId: t.project,
-    })),
-    recentlyCompletedTitles: recentDone.slice(0, 20).map((t) => t.title),
+    tasks: taskDigest,
     recentJournal: journal.slice(0, 20).map((j) => ({
       kind: j.kind,
       note: j.note,
@@ -104,6 +103,7 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
       .map((p) => ({ key: p.key, value: p.value })),
     tendencies: tendencies.slice(0, 10).map((t) => ({ text: t.text, confidence: t.confidence })),
     alreadyProposedSourceKeys: recentKeys,
+    recentlyShownNotificationTitles,
   };
 
   const system = [
@@ -117,7 +117,8 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
     "",
     "## What NOT to propose",
     "- Anything whose sourceKey appears in alreadyProposedSourceKeys — that was already handled.",
-    "- Anything whose title is a near-duplicate of an existing openTask title or recentlyCompletedTitles entry. Normalize casing/punctuation before comparing.",
+    "- Anything whose title is a near-duplicate of a task in tasks.topOpen or tasks.recentlyCompleted. Normalize casing/punctuation before comparing.",
+    "- Anything whose intent duplicates a title in recentlyShownNotificationTitles — the user already saw a proactive card about that and doesn't need the same thing reworded as a task.",
     "- Tasks for subscribed (FYI) events — those are already filtered out of upcomingEvents.",
     "- Vague tasks like 'work on project' or 'study more'. Every task must be concrete enough that the user could start it in the next 30 minutes.",
     "- Tasks with no clear due date AND no clear project. If you can't place it in time or in a project, it's probably not ready to be a task.",
@@ -147,9 +148,9 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
     return { created: [], skipped: 0 };
   }
 
-  const normalizedExisting = new Set([
-    ...openTasks.map((t) => normalizeTitle(t.title)),
-    ...recentDone.map((t) => normalizeTitle(t.title)),
+  const normalizedExisting = new Set<string>([
+    ...openTasksRaw.map((t) => normalizeTitle(t.title)),
+    ...taskDigest.recentlyCompleted.map((t) => normalizeTitle(t.title)),
   ]);
   const recentKeySet = new Set(recentKeys);
   const projectIds = new Set(projects.map((p) => p.id));

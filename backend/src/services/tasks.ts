@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import { db, schema } from "../db/client.js";
 import { newId } from "../lib/ids.js";
 import type { TaskCreateInput, TaskPatchInput } from "../schemas/tasks.js";
@@ -22,13 +22,95 @@ const hydrate = (r: Row) => ({
   updatedAt: r.updatedAt,
 });
 
-export async function listTasks(userId: string) {
+// Default: return everything, since the /api/tasks route and the UI still
+// expect the full dataset. AI callers (proposer, insights, planner, chat)
+// should prefer the narrower helpers below instead of pulling all rows.
+export async function listTasks(userId: string, opts?: ListTasksOptions) {
+  const conds = [eq(schema.tasks.userId, userId)];
+  if (opts?.openOnly) conds.push(ne(schema.tasks.status, "done"));
   const rows = await db
     .select()
     .from(schema.tasks)
-    .where(eq(schema.tasks.userId, userId))
+    .where(and(...conds))
     .orderBy(asc(schema.tasks.dueDate));
-  return rows.map(hydrate);
+  const all = rows.map(hydrate);
+  if (opts?.includeDoneSince && !opts.openOnly) {
+    return all.filter(
+      (t) =>
+        t.status !== "done" ||
+        (t.completedAt && +t.completedAt >= +opts.includeDoneSince!),
+    );
+  }
+  return all;
+}
+
+export type ListTasksOptions = {
+  // Exclude done tasks entirely.
+  openOnly?: boolean;
+  // Keep open tasks plus done tasks completed on/after this timestamp.
+  includeDoneSince?: Date;
+};
+
+// Compressed view of the user's task list for LLM contexts. Returns counts
+// by project/priority and capped recent titles, so we don't ship hundreds of
+// rows to the model when all it needs is "what's open and what was just
+// completed". Callers should prefer this over `listTasks()` when the LLM is
+// the consumer.
+export async function summarizeTasks(
+  userId: string,
+  opts?: { openLimit?: number; recentDoneDays?: number; recentDoneLimit?: number },
+) {
+  const openLimit = opts?.openLimit ?? 25;
+  const recentDoneDays = opts?.recentDoneDays ?? 14;
+  const recentDoneLimit = opts?.recentDoneLimit ?? 10;
+  const cutoff = new Date(Date.now() - recentDoneDays * 24 * 60 * 60 * 1000);
+
+  const all = await listTasks(userId, { includeDoneSince: cutoff });
+  const open = all.filter((t) => t.status !== "done");
+  const recentDone = all
+    .filter((t) => t.status === "done" && t.completedAt && +t.completedAt >= +cutoff)
+    .sort((a, b) => (+(b.completedAt ?? 0)) - (+(a.completedAt ?? 0)));
+
+  const byProject: Record<string, number> = {};
+  const byPriority: Record<string, number> = { P0: 0, P1: 0, P2: 0 };
+  let overdue = 0;
+  let dueToday = 0;
+  const now = Date.now();
+  const in24h = now + 24 * 60 * 60 * 1000;
+  for (const t of open) {
+    const pid = t.project ?? "(none)";
+    byProject[pid] = (byProject[pid] ?? 0) + 1;
+    byPriority[t.priority] = (byPriority[t.priority] ?? 0) + 1;
+    if (t.due) {
+      const d = +t.due;
+      if (d < now) overdue++;
+      else if (d < in24h) dueToday++;
+    }
+  }
+
+  return {
+    totals: {
+      open: open.length,
+      recentlyDone: recentDone.length,
+      overdue,
+      dueWithin24h: dueToday,
+    },
+    openByProject: byProject,
+    openByPriority: byPriority,
+    topOpen: open.slice(0, openLimit).map((t) => ({
+      id: t.id,
+      title: t.title,
+      priority: t.priority,
+      due: t.due ? t.due.toISOString() : null,
+      estMin: t.estMin,
+      projectId: t.project,
+      status: t.status,
+    })),
+    recentlyCompleted: recentDone.slice(0, recentDoneLimit).map((t) => ({
+      title: t.title,
+      completedAt: t.completedAt ? (t.completedAt as Date).toISOString() : null,
+    })),
+  };
 }
 
 export async function getTask(userId: string, id: string) {

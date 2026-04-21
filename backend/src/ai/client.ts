@@ -27,6 +27,28 @@ export function stripReasoning(text: string): string {
   return text.replace(THINK_BLOCK, "").replace(UNTERMINATED_TRAILING, "").trim();
 }
 
+// Reasoning-class models burn most of their max_tokens inside <think> blocks.
+// If the ceiling is too low the response is truncated mid-thought and the
+// caller never sees any JSON/answer. Floor the budget for these providers so
+// callers that pass a modest maxTokens (e.g. 800 for the planner) still leave
+// enough headroom for the actual response.
+const REASONING_PROVIDER_FLOOR: Partial<Record<ProviderId, number>> = {
+  minimax: 16000,
+  "z-ai": 16000,
+  kimi: 12000,
+};
+
+function resolveMaxTokens(provider: ProviderId, model: string, requested: number | undefined, fallback: number): number {
+  const base = requested ?? fallback;
+  const floor = REASONING_PROVIDER_FLOOR[provider];
+  if (floor && base < floor) return floor;
+  // OpenRouter routes many reasoning models too — bump DeepSeek R-series / OSS thinkers.
+  if (provider === "openrouter" && /(^|\/)(deepseek-r1|qwq|qwen.*thinking|glm-4\.?\d|minimax|kimi)/i.test(model) && base < 16000) {
+    return 16000;
+  }
+  return base;
+}
+
 function getAnthropic(apiKey: string): Anthropic {
   let c = anthropicCache.get(apiKey);
   if (!c) {
@@ -85,7 +107,7 @@ export async function complete(
 
   const body = {
     model,
-    max_tokens: req.maxTokens ?? 600,
+    max_tokens: resolveMaxTokens(provider, model, req.maxTokens, 600),
     messages: [
       { role: "system", content: req.system },
       ...req.messages,
@@ -211,7 +233,7 @@ export async function completeWithTools(
       headers,
       body: JSON.stringify({
         model,
-        max_tokens: req.maxTokens ?? 1500,
+        max_tokens: resolveMaxTokens(provider, model, req.maxTokens, 1500),
         messages: msgs,
         tools: tools.map((t) => ({
           type: "function",

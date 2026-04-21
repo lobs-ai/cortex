@@ -45,7 +45,7 @@ export async function generateDailyPlan(
   const last14 = new Date(+date - 14 * 24 * 60 * 60 * 1000);
   const [events, tasks, free, journal, preferences, tendencies] = await Promise.all([
     listEvents(userId, { from: startOfDayInTz(date, tz), to: endOfDayInTz(date, tz) }),
-    listTasks(userId),
+    listTasks(userId, { openOnly: true }),
     findFreeBlocks(userId, date, { minMinutes: 30, tz }),
     listEntries(userId, { from: last14, limit: 25 }),
     listPreferences(userId),
@@ -53,7 +53,6 @@ export async function generateDailyPlan(
   ]);
 
   const topTasks = tasks
-    .filter((t) => t.status !== "done")
     .slice(0, 25)
     .map((t) => ({
       id: t.id,
