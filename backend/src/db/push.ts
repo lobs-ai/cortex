@@ -13,6 +13,21 @@ export function applySchema(): void {
   addColumnIfMissing("notifications", "requires_ack", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing("tasks", "skip_count", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing("tasks", "last_missed_at", "INTEGER");
+  addColumnIfMissing("commitments", "skip_category", "TEXT");
+  addColumnIfMissing("commitments", "waiting_on", "TEXT");
+  addColumnIfMissing("commitments", "waiting_until", "INTEGER");
+  addColumnIfMissing("commitments", "replaced_by_commitment_id", "TEXT");
+  addColumnIfMissing("commitments", "replaces_commitment_id", "TEXT");
+  addColumnIfMissing("tasks", "canonical_task_id", "TEXT");
+  addColumnIfMissing("tasks", "parent_task_id", "TEXT");
+  addColumnIfMissing("tasks", "outcome", "TEXT");
+  addColumnIfMissing("tasks", "abandon_reason", "TEXT");
+  addColumnIfMissing("tasks", "blocked_on", "TEXT");
+  addColumnIfMissing("tasks", "blocked_until", "INTEGER");
+  addColumnIfMissing("tasks", "snooze_until", "INTEGER");
+  addColumnIfMissing("tasks", "stale_at", "INTEGER");
+  addColumnIfMissing("tasks", "triaged_at", "INTEGER");
+  addColumnIfMissing("tasks", "last_activity_at", "INTEGER");
 }
 
 function addColumnIfMissing(table: string, column: string, definition: string) {
@@ -107,7 +122,28 @@ CREATE TABLE IF NOT EXISTS tasks (
   tags_json TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  completed_at INTEGER
+  completed_at INTEGER,
+  skip_count INTEGER NOT NULL DEFAULT 0,
+  last_missed_at INTEGER,
+  canonical_task_id TEXT,
+  parent_task_id TEXT,
+  outcome TEXT,
+  abandon_reason TEXT,
+  blocked_on TEXT,
+  blocked_until INTEGER,
+  snooze_until INTEGER,
+  stale_at INTEGER,
+  triaged_at INTEGER,
+  last_activity_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS task_events (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  payload_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS reminders (
@@ -283,6 +319,11 @@ CREATE TABLE IF NOT EXISTS commitments (
   completed_at INTEGER,
   artifact TEXT,
   skip_reason TEXT,
+  skip_category TEXT,
+  waiting_on TEXT,
+  waiting_until INTEGER,
+  replaced_by_commitment_id TEXT,
+  replaces_commitment_id TEXT,
   notification_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -342,6 +383,8 @@ CREATE INDEX IF NOT EXISTS idx_agent_proposals_user_created ON agent_proposals (
 CREATE INDEX IF NOT EXISTS idx_commitments_user_state_start ON commitments (user_id, state, start_time);
 CREATE INDEX IF NOT EXISTS idx_commitments_user_start ON commitments (user_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_commitment_events_cid ON commitment_events (commitment_id, at);
+CREATE INDEX IF NOT EXISTS idx_task_events_tid ON task_events (task_id, at);
+CREATE INDEX IF NOT EXISTS idx_tasks_canonical ON tasks (user_id, canonical_task_id);
 `;
 
 // Direct run: `npm run db:push` invokes this file via tsx, so do the apply.

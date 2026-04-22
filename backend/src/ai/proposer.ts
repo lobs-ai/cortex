@@ -6,7 +6,12 @@ import { getActiveKey } from "../services/apiKeys.js";
 import { getProvider } from "./registry.js";
 import { getRoleModel } from "../services/settings.js";
 import { listEvents } from "../services/events.js";
-import { createTask, listTasks, summarizeTasks } from "../services/tasks.js";
+import {
+  createTask,
+  findSemanticDuplicate,
+  listTasks,
+  summarizeTasks,
+} from "../services/tasks.js";
 import { listProjects } from "../services/projects.js";
 import { listEntries } from "../services/journal.js";
 import { listPreferences, listTendencies } from "../services/memory.js";
@@ -169,6 +174,14 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
       continue;
     }
     if (normalizedExisting.has(normalizeTitle(p.title))) {
+      skipped++;
+      continue;
+    }
+    // Shared dedup — catches rows in non-terminal states including snoozed,
+    // blocked, and stale. Prevents proposing "email Sarah" while one is
+    // already snoozed until next week.
+    const dup = await findSemanticDuplicate(userId, p.title);
+    if (dup) {
       skipped++;
       continue;
     }

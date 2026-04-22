@@ -10,7 +10,24 @@ import {
 import { regenerateDailyPlan } from "../services/plans.js";
 import { patchTask } from "../services/tasks.js";
 import { runMonitor } from "../ai/monitor.js";
-import { markDoing, markDone, markSkipped } from "../services/commitments.js";
+import {
+  SKIP_CATEGORIES,
+  addNote as addCommitNote,
+  markDoing,
+  markDone,
+  markSkipped,
+  markUnblocked,
+  markWaiting,
+  rescheduleCommitment,
+  type SkipCategory,
+} from "../services/commitments.js";
+import {
+  abandonTask,
+  findSemanticDuplicate,
+  mergeTask,
+  snoozeTask,
+  unblockTask,
+} from "../services/tasks.js";
 import { db, schema } from "../db/client.js";
 import { and, eq } from "drizzle-orm";
 
@@ -36,6 +53,18 @@ const KNOWN_OPS = new Set([
   "commit.ack",
   "commit.done",
   "commit.skip",
+  "commit.note",
+  "commit.wait",
+  "commit.unblock",
+  "commit.reschedule",
+  // Task state-machine ops — emitted from gardener proposal cards. The
+  // handler looks up the related task via relatedObjectId and dispatches
+  // into the tasks service.
+  "task.unblock",
+  "task.abandon_open",
+  "task.keep",
+  "task.snooze_1w",
+  "task.merge_into_canonical",
 ]);
 
 export async function notificationRoutes(app: FastifyInstance) {
@@ -99,26 +128,119 @@ export async function notificationRoutes(app: FastifyInstance) {
       } else if (op === "reschedule_block") {
         await regenerateDailyPlan(u.id);
         effect = { kind: "plan_regenerated" };
-      } else if (op === "commit.ack" || op === "commit.done" || op === "commit.skip") {
+      } else if (op.startsWith("commit.")) {
         if (existing.relatedObjectType !== "commitment" || !existing.relatedObjectId) {
           effect = { kind: "handler_failed", reason: "no_commitment_link" };
         } else {
           const cid = existing.relatedObjectId;
           const artifact = typeof payload?.artifact === "string" ? payload.artifact : undefined;
           const reason = typeof payload?.reason === "string" ? payload.reason : "";
+          const category = (
+            typeof payload?.category === "string" &&
+            (SKIP_CATEGORIES as readonly string[]).includes(payload.category)
+              ? payload.category
+              : "other"
+          ) as SkipCategory;
+          const text = typeof payload?.text === "string" ? payload.text : "";
+          const waitingOn = typeof payload?.waitingOn === "string" ? payload.waitingOn : "";
+          const until = typeof payload?.until === "string" ? new Date(payload.until) : null;
+          const startTime =
+            typeof payload?.startTime === "string" ? new Date(payload.startTime) : null;
+          const durationMin =
+            typeof payload?.durationMin === "number" ? payload.durationMin : undefined;
+
           if (op === "commit.ack") {
             const row = await markDoing(u.id, cid);
             effect = { kind: "commit_doing", commitmentId: cid, state: row?.state ?? "unknown" };
           } else if (op === "commit.done") {
             const row = await markDone(u.id, cid, artifact);
             effect = { kind: "commit_done", commitmentId: cid, state: row?.state ?? "unknown" };
-          } else {
-            const row = await markSkipped(u.id, cid, reason);
+          } else if (op === "commit.skip") {
+            const row = await markSkipped(u.id, cid, reason, category);
             effect = { kind: "commit_skipped", commitmentId: cid, state: row?.state ?? "unknown" };
-            // Reslotting on skip runs out-of-band (planner) so the HTTP
-            // response stays cheap. Worker picks it up on next tick.
+          } else if (op === "commit.note") {
+            const row = await addCommitNote(u.id, cid, text);
+            effect = { kind: "commit_noted", commitmentId: cid, state: row?.state ?? "unknown" };
+          } else if (op === "commit.wait") {
+            const row = await markWaiting(u.id, cid, waitingOn || "external", until);
+            effect = { kind: "commit_waiting", commitmentId: cid, state: row?.state ?? "unknown" };
+          } else if (op === "commit.unblock") {
+            const row = await markUnblocked(u.id, cid);
+            effect = { kind: "commit_unblocked", commitmentId: cid, state: row?.state ?? "unknown" };
+          } else if (op === "commit.reschedule") {
+            if (!startTime) {
+              effect = { kind: "handler_failed", reason: "missing_startTime" };
+            } else {
+              const row = await rescheduleCommitment(u.id, cid, startTime, durationMin);
+              effect = {
+                kind: "commit_rescheduled",
+                commitmentId: cid,
+                newCommitmentId: row?.id ?? null,
+                state: row?.state ?? "unknown",
+              };
+            }
           }
-          await clearRequiresAck(u.id, id);
+          // Notes and waits shouldn't clear the ack requirement — the user
+          // may still need to respond to the original prompt. All other
+          // commit.* ops close the nag.
+          if (op !== "commit.note" && op !== "commit.wait") {
+            await clearRequiresAck(u.id, id);
+          }
+        }
+      } else if (op.startsWith("task.")) {
+        if (existing.relatedObjectType !== "task" || !existing.relatedObjectId) {
+          effect = { kind: "handler_failed", reason: "no_task_link" };
+        } else {
+          const tid = existing.relatedObjectId;
+          const reason = typeof payload?.reason === "string" ? payload.reason : "";
+          if (op === "task.unblock") {
+            const t = await unblockTask(u.id, tid);
+            effect = { kind: "task_unblocked", taskId: tid, state: t?.status ?? "unknown" };
+          } else if (op === "task.keep") {
+            // "Keep it" on a stale/dup card: surface it back for the user
+            // to triage manually. No automatic state change beyond clearing
+            // the stale flag so the gardener doesn't re-propose tomorrow.
+            // The tasks route's revive endpoint handles that cleanly.
+            effect = { kind: "task_kept", taskId: tid };
+          } else if (op === "task.snooze_1w") {
+            const until = new Date(Date.now() + 7 * 86400 * 1000);
+            const t = await snoozeTask(u.id, tid, until);
+            effect = { kind: "task_snoozed", taskId: tid, state: t?.status ?? "unknown" };
+          } else if (op === "task.abandon_open") {
+            // Open the abandon sheet in the UI — the frontend will prompt
+            // for a reason and then POST /api/tasks/:id/abandon directly.
+            effect = { kind: "navigate_abandon", taskId: tid };
+          } else if (op === "task.merge_into_canonical") {
+            // Look the canonical up fresh rather than trusting a stashed
+            // pointer; the world may have moved on between proposal and
+            // acceptance.
+            const [existingTask] = await db
+              .select()
+              .from(schema.tasks)
+              .where(
+                and(
+                  eq(schema.tasks.userId, u.id),
+                  eq(schema.tasks.id, tid),
+                ),
+              );
+            if (!existingTask) {
+              effect = { kind: "handler_failed", reason: "task_gone" };
+            } else {
+              const match = await findSemanticDuplicate(u.id, existingTask.title, { ignoreId: tid });
+              if (!match) {
+                effect = { kind: "handler_failed", reason: "no_current_duplicate" };
+              } else {
+                const t = await mergeTask(u.id, tid, match.id);
+                effect = {
+                  kind: "task_merged",
+                  taskId: tid,
+                  canonicalId: match.id,
+                  state: t?.status ?? "unknown",
+                  reason,
+                };
+              }
+            }
+          }
         }
       } else if (!KNOWN_OPS.has(op)) {
         effect = { kind: "recorded_only", reason: "unknown_op" };

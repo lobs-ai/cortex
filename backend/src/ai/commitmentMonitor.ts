@@ -25,6 +25,7 @@ export type CommitmentTickResult = {
   escalated: number;
   missed: number;
   verifyAsked: number;
+  unblockAsked: number;
 };
 
 export async function runCommitmentMonitor(userId: string): Promise<CommitmentTickResult> {
@@ -34,11 +35,25 @@ export async function runCommitmentMonitor(userId: string): Promise<CommitmentTi
   let escalated = 0;
   let missed = 0;
   let verifyAsked = 0;
+  let unblockAsked = 0;
 
   for (const c of live) {
     const startMs = +c.startTime;
     const endMs = startMs + c.durationMin * 60 * 1000;
     const nowMs = +now;
+
+    // Waiting state is user-paused — no nag. If waitingUntil was set and
+    // has passed, surface an "unblocked?" check so the user is reminded.
+    if (c.state === "waiting") {
+      if (c.waitingUntil && +c.waitingUntil <= nowMs) {
+        const already = await hasOpenUnblockNotification(userId, c.id);
+        if (!already) {
+          await sendUnblockCheckNotification(userId, c);
+          unblockAsked++;
+        }
+      }
+      continue;
+    }
 
     if (c.state === "pending" && nowMs >= startMs) {
       await sendPromptNotification(userId, c, 0);
@@ -79,7 +94,43 @@ export async function runCommitmentMonitor(userId: string): Promise<CommitmentTi
     }
   }
 
-  return { prompted, escalated, missed, verifyAsked };
+  return { prompted, escalated, missed, verifyAsked, unblockAsked };
+}
+
+async function sendUnblockCheckNotification(
+  userId: string,
+  c: CommitmentRow,
+): Promise<void> {
+  await createNotification(userId, {
+    severity: "low",
+    kind: "commitment.unblock_check",
+    title: `Still waiting on ${c.waitingOn ?? "something"}?`,
+    body: `You paused "${c.title}". If you're unblocked, pick it back up.`,
+    actions: [
+      { label: "Unblocked — resume", op: "commit.unblock" },
+      { label: "Still waiting", op: "dismiss" },
+    ],
+    relatedObjectType: "commitment",
+    relatedObjectId: c.id,
+  });
+  await logEvent(userId, c.id, "unblock_check_asked");
+}
+
+async function hasOpenUnblockNotification(
+  userId: string,
+  commitmentId: string,
+): Promise<boolean> {
+  const rows = await db
+    .select()
+    .from(schema.notifications)
+    .where(
+      and(
+        eq(schema.notifications.userId, userId),
+        eq(schema.notifications.kind, "commitment.unblock_check"),
+        eq(schema.notifications.relatedObjectId, commitmentId),
+      ),
+    );
+  return rows.some((r) => !r.dismissedAt);
 }
 
 async function sendPromptNotification(

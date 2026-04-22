@@ -8,6 +8,7 @@ import { fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 import { Dot, PriorityChip, ProjectTag } from "@/components/Primitives";
 import { NowCard } from "@/components/NowCard";
+import { TriageCard } from "@/components/TriageCard";
 
 export default function DashboardPage() {
   const qc = useQueryClient();
@@ -133,8 +134,9 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div style={{ padding: "0 18px 4px" }}>
+      <div style={{ padding: "0 18px 4px", display: "grid", gap: 10 }}>
         <NowCard />
+        <TriageCard />
       </div>
 
       <div

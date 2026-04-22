@@ -15,19 +15,51 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export type TaskStatus =
+  | "inbox"
+  | "today"
+  | "doing"
+  | "done"
+  | "snoozed"
+  | "blocked"
+  | "abandoned"
+  | "merged"
+  | "stale";
+
 export type Task = {
   id: string;
   title: string;
   description: string | null;
   due: string | null;
   priority: "P0" | "P1" | "P2";
-  status: "inbox" | "today" | "doing" | "done";
+  status: TaskStatus;
   estMin: number | null;
   actualMin: number | null;
   project: string | null;
   energy: "low" | "med" | "high";
   tags: string[];
   completedAt: string | null;
+  skipCount?: number;
+  canonicalTaskId?: string | null;
+  parentTaskId?: string | null;
+  outcome?: string | null;
+  abandonReason?: string | null;
+  blockedOn?: string | null;
+  blockedUntil?: string | null;
+  snoozeUntil?: string | null;
+  staleAt?: string | null;
+  triagedAt?: string | null;
+  lastActivityAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type TaskEvent = {
+  id: string;
+  taskId: string;
+  kind: string;
+  at: string;
+  payload: Record<string, unknown> | null;
 };
 
 export type Event = {
@@ -180,6 +212,24 @@ export type JournalEntry = {
   updatedAt: string;
 };
 
+export type SkipCategory =
+  | "wrong_time"
+  | "too_tired"
+  | "blocked"
+  | "unclear"
+  | "not_priority"
+  | "other";
+
+export type CommitmentState =
+  | "pending"
+  | "prompted"
+  | "doing"
+  | "waiting"
+  | "done"
+  | "skipped"
+  | "missed"
+  | "rescheduled";
+
 export type Commitment = {
   id: string;
   taskId: string | null;
@@ -188,7 +238,7 @@ export type Commitment = {
   verifyCriterion: string | null;
   startTime: string;
   durationMin: number;
-  state: "pending" | "prompted" | "doing" | "done" | "skipped" | "missed";
+  state: CommitmentState;
   source: "user" | "planner" | "replan";
   escalationLevel: number;
   promptedAt: string | null;
@@ -196,9 +246,22 @@ export type Commitment = {
   completedAt: string | null;
   artifact: string | null;
   skipReason: string | null;
+  skipCategory: SkipCategory | null;
+  waitingOn: string | null;
+  waitingUntil: string | null;
+  replacedByCommitmentId: string | null;
+  replacesCommitmentId: string | null;
   notificationId: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type CommitmentEvent = {
+  id: string;
+  commitmentId: string;
+  kind: string;
+  at: string;
+  payload: Record<string, unknown> | null;
 };
 
 export type CommitmentNow = {
@@ -231,11 +294,58 @@ export type ChatMessage = {
 export const api = {
   tasks: {
     list: () => req<Task[]>("/api/tasks"),
-    create: (body: Partial<Task> & { title: string }) =>
+    create: (body: Partial<Task> & { title: string; skipDedup?: boolean }) =>
       req<Task>("/api/tasks", { method: "POST", body: JSON.stringify(body) }),
     patch: (id: string, body: Partial<Task>) =>
       req<Task>(`/api/tasks/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
     remove: (id: string) => req<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }),
+    triage: (id: string, to: "today" | "doing" | "inbox") =>
+      req<Task>(`/api/tasks/${id}/triage`, {
+        method: "POST",
+        body: JSON.stringify({ to }),
+      }),
+    snooze: (id: string, until: Date) =>
+      req<Task>(`/api/tasks/${id}/snooze`, {
+        method: "POST",
+        body: JSON.stringify({ until: until.toISOString() }),
+      }),
+    block: (id: string, reason: string, until?: Date | null) =>
+      req<Task>(`/api/tasks/${id}/block`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason,
+          until: until ? until.toISOString() : null,
+        }),
+      }),
+    unblock: (id: string) =>
+      req<Task>(`/api/tasks/${id}/unblock`, { method: "POST" }),
+    abandon: (id: string, reason: string) =>
+      req<Task>(`/api/tasks/${id}/abandon`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      }),
+    complete: (id: string, outcome?: string) =>
+      req<Task>(`/api/tasks/${id}/complete`, {
+        method: "POST",
+        body: JSON.stringify({ outcome }),
+      }),
+    merge: (id: string, canonicalId: string) =>
+      req<Task>(`/api/tasks/${id}/merge`, {
+        method: "POST",
+        body: JSON.stringify({ canonicalId }),
+      }),
+    revive: (id: string) =>
+      req<Task>(`/api/tasks/${id}/revive`, { method: "POST" }),
+    note: (id: string, text: string) =>
+      req<Task>(`/api/tasks/${id}/note`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      }),
+    events: (id: string) => req<TaskEvent[]>(`/api/tasks/${id}/events`),
+    dedupCheck: (title: string) =>
+      req<{ match: { id: string; title: string; status: string } | null }>(
+        `/api/tasks/dedup-check?title=${encodeURIComponent(title)}`,
+      ),
   },
   events: {
     list: (from?: Date, to?: Date) => {
@@ -335,11 +445,36 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ artifact }),
       }),
-    skip: (id: string, reason: string) =>
+    skip: (id: string, reason: string, category: SkipCategory = "other") =>
       req<Commitment>(`/api/commitments/${id}/skip`, {
         method: "POST",
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ reason, category }),
       }),
+    note: (id: string, text: string) =>
+      req<Commitment>(`/api/commitments/${id}/note`, {
+        method: "POST",
+        body: JSON.stringify({ text }),
+      }),
+    wait: (id: string, waitingOn: string, until?: Date | null) =>
+      req<Commitment>(`/api/commitments/${id}/wait`, {
+        method: "POST",
+        body: JSON.stringify({
+          waitingOn,
+          until: until ? until.toISOString() : null,
+        }),
+      }),
+    unblock: (id: string) =>
+      req<Commitment>(`/api/commitments/${id}/unblock`, { method: "POST" }),
+    reschedule: (id: string, startTime: Date, durationMin?: number) =>
+      req<Commitment>(`/api/commitments/${id}/reschedule`, {
+        method: "POST",
+        body: JSON.stringify({
+          startTime: startTime.toISOString(),
+          ...(durationMin !== undefined ? { durationMin } : {}),
+        }),
+      }),
+    events: (id: string) =>
+      req<CommitmentEvent[]>(`/api/commitments/${id}/events`),
   },
   notifications: {
     list: () => req<Alert[]>("/api/notifications"),

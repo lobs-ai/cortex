@@ -98,6 +98,32 @@ export const tasks = sqliteTable("tasks", {
   // activation chunks for tasks the user has been skipping.
   skipCount: integer("skip_count").notNull().default(0),
   lastMissedAt: integer("last_missed_at", { mode: "timestamp_ms" }),
+  // State-machine extensions — see services/tasks.ts. Status vocabulary grew
+  // beyond inbox/today/doing/done to snoozed | blocked | abandoned | merged |
+  // stale so the gardener can keep the list alive without force-deleting.
+  // All of these are timestamped and keep the old `status` field as the
+  // canonical state label.
+  canonicalTaskId: text("canonical_task_id"),
+  parentTaskId: text("parent_task_id"),
+  outcome: text("outcome"),
+  abandonReason: text("abandon_reason"),
+  blockedOn: text("blocked_on"),
+  blockedUntil: integer("blocked_until", { mode: "timestamp_ms" }),
+  snoozeUntil: integer("snooze_until", { mode: "timestamp_ms" }),
+  staleAt: integer("stale_at", { mode: "timestamp_ms" }),
+  triagedAt: integer("triaged_at", { mode: "timestamp_ms" }),
+  lastActivityAt: integer("last_activity_at", { mode: "timestamp_ms" }),
+});
+
+// Audit trail for task transitions — same shape as commitment_events. Feeds
+// the task timeline drawer and the gardener's "hasn't moved in 14d" test.
+export const taskEvents = sqliteTable("task_events", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  taskId: text("task_id").notNull(),
+  kind: text("kind").notNull(), // created | triaged | scheduled | snoozed | awoken | blocked | unblocked | merged | abandoned | marked_stale | revived | done | note | updated
+  at: integer("at", { mode: "timestamp_ms" }).notNull(),
+  payloadJson: text("payload_json"),
 });
 
 export const reminders = sqliteTable("reminders", {
@@ -304,6 +330,18 @@ export const commitments = sqliteTable("commitments", {
   completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   artifact: text("artifact"),
   skipReason: text("skip_reason"),
+  // Structured skip reason so the planner can learn: one of
+  // "wrong_time" | "too_tired" | "blocked" | "unclear" | "not_priority" | "other".
+  // Distinct from skipReason which is the free-text detail.
+  skipCategory: text("skip_category"),
+  // Waiting-state fields. Set when the user is blocked on someone/something.
+  waitingOn: text("waiting_on"),
+  waitingUntil: integer("waiting_until", { mode: "timestamp_ms" }),
+  // Reschedule chain. When a commitment is rescheduled, this row's
+  // replacedByCommitmentId points forward to its replacement; the new row's
+  // replacesCommitmentId points back. Lets the timeline render the chain.
+  replacedByCommitmentId: text("replaced_by_commitment_id"),
+  replacesCommitmentId: text("replaces_commitment_id"),
   notificationId: text("notification_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),

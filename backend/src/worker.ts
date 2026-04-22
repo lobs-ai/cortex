@@ -2,6 +2,7 @@ import { DEMO_USER_ID } from "./lib/user.js";
 import { runMonitor } from "./ai/monitor.js";
 import { runCommitmentMonitor } from "./ai/commitmentMonitor.js";
 import { runDailyReview } from "./ai/review.js";
+import { runGardener } from "./ai/gardener.js";
 import { syncCalendar } from "./services/googleCalendar.js";
 import { db, schema } from "./db/client.js";
 import { newId } from "./lib/ids.js";
@@ -106,13 +107,26 @@ async function calendarTick() {
 async function commitmentTick() {
   try {
     const r = await runCommitmentMonitor(DEMO_USER_ID);
-    if (r.prompted + r.escalated + r.missed + r.verifyAsked > 0) {
+    if (r.prompted + r.escalated + r.missed + r.verifyAsked + r.unblockAsked > 0) {
       console.log(
-        `commitments: ${r.prompted} prompted, ${r.escalated} escalated, ${r.verifyAsked} verify asked, ${r.missed} missed`,
+        `commitments: ${r.prompted} prompted, ${r.escalated} escalated, ${r.verifyAsked} verify asked, ${r.unblockAsked} unblock asked, ${r.missed} missed`,
       );
     }
   } catch (err) {
     console.error("commitment monitor error:", err);
+  }
+}
+
+async function gardenerTick() {
+  try {
+    const r = await runGardener(DEMO_USER_ID);
+    if (r.awoken + r.blockedSurfaced + r.staled + r.dupeProposals + r.killProposals > 0) {
+      console.log(
+        `gardener: ${r.awoken} awoken, ${r.blockedSurfaced} block-expired, ${r.staled} staled, ${r.dupeProposals} dupes, ${r.killProposals} kill proposals`,
+      );
+    }
+  } catch (err) {
+    console.error("gardener error:", err);
   }
 }
 
@@ -130,8 +144,17 @@ async function dailyReviewTick() {
 }
 
 console.log("cortex worker starting");
-await Promise.all([monitorTick(), calendarTick(), commitmentTick(), dailyReviewTick()]);
+await Promise.all([
+  monitorTick(),
+  calendarTick(),
+  commitmentTick(),
+  dailyReviewTick(),
+  gardenerTick(),
+]);
 setInterval(monitorTick, MONITOR_INTERVAL_MS);
 setInterval(calendarTick, CALENDAR_INTERVAL_MS);
 setInterval(commitmentTick, COMMITMENT_INTERVAL_MS);
 setInterval(dailyReviewTick, DAILY_REVIEW_INTERVAL_MS);
+// Same cadence as the daily review — cheap deterministic scan, the
+// suppression window inside the gardener prevents repeat proposals.
+setInterval(gardenerTick, DAILY_REVIEW_INTERVAL_MS);

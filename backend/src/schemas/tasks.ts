@@ -1,6 +1,20 @@
 import { z } from "zod";
 
-export const TaskStatus = z.enum(["inbox", "today", "doing", "done"]);
+// "Playable" states — planner considers these.
+export const PLAYABLE_STATUSES = ["inbox", "today", "doing"] as const;
+// Full state vocabulary — includes gardener/triage states that are still
+// alive but should not be scheduled.
+export const TaskStatus = z.enum([
+  "inbox",
+  "today",
+  "doing",
+  "done",
+  "snoozed",
+  "blocked",
+  "abandoned",
+  "merged",
+  "stale",
+]);
 export const Priority = z.enum(["P0", "P1", "P2"]);
 export const Energy = z.enum(["low", "med", "high"]);
 

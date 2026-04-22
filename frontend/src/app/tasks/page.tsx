@@ -7,6 +7,7 @@ import { fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 import { Dot, PriorityChip } from "@/components/Primitives";
 import { Habits } from "@/components/Habits";
+import { TaskTimeline } from "@/components/TaskTimeline";
 
 const COLUMNS: { id: Task["status"]; label: string }[] = [
   { id: "inbox", label: "Inbox" },
@@ -74,6 +75,12 @@ export default function TasksPage() {
 
   const [dragId, setDragId] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<Task["status"] | null>(null);
+  const [drawerTaskId, setDrawerTaskId] = useState<string | null>(null);
+  const drawerTask = drawerTaskId ? tasks.find((t) => t.id === drawerTaskId) ?? null : null;
+
+  const holding = tasks.filter((t) =>
+    (["snoozed", "blocked", "stale", "abandoned"] as Task["status"][]).includes(t.status),
+  );
 
   const open = tasks.filter((t) => t.status !== "done").length;
   const done = tasks.filter((t) => t.status === "done").length;
@@ -144,7 +151,8 @@ export default function TasksPage() {
                         e.dataTransfer.effectAllowed = "move";
                       }}
                       onDragEnd={() => setDragId(null)}
-                      style={{ opacity: isDone ? 0.55 : 1 }}
+                      onClick={() => setDrawerTaskId(t.id)}
+                      style={{ opacity: isDone ? 0.55 : 1, cursor: "pointer" }}
                     >
                       <div className="card-hd">
                         <PriorityChip p={t.priority} />
@@ -155,6 +163,11 @@ export default function TasksPage() {
                           </span>
                         )}
                         <span className="grow" />
+                        {typeof t.skipCount === "number" && t.skipCount > 0 && (
+                          <span className="mono" style={{ color: "var(--red)", fontSize: 10 }}>
+                            ×{t.skipCount}
+                          </span>
+                        )}
                         <span className="mono">{t.estMin ?? "?"}m</span>
                       </div>
                       <div
@@ -185,6 +198,48 @@ export default function TasksPage() {
           );
         })}
       </div>
+
+      {holding.length > 0 && (
+        <div className="panel" style={{ margin: 18 }}>
+          <div className="panel-hd">
+            <span className="title">
+              <b>Holding</b> · paused, stale, or abandoned
+            </span>
+            <span className="mono muted" style={{ fontSize: 11 }}>
+              {holding.length}
+            </span>
+          </div>
+          <div>
+            {holding.map((t) => (
+              <div
+                key={t.id}
+                onClick={() => setDrawerTaskId(t.id)}
+                style={{
+                  padding: "8px 14px",
+                  borderBottom: "1px solid var(--hair)",
+                  display: "grid",
+                  gridTemplateColumns: "90px 1fr auto",
+                  gap: 10,
+                  alignItems: "center",
+                  cursor: "pointer",
+                }}
+              >
+                <span className="caps" style={{ fontSize: 10, color: holdingColor(t.status) }}>
+                  {t.status.toUpperCase()}
+                </span>
+                <span style={{ fontSize: 12.5 }}>{t.title}</span>
+                <span className="mono muted" style={{ fontSize: 10.5 }}>
+                  {holdingDetail(t)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {drawerTask && (
+        <TaskTimeline task={drawerTask} onClose={() => setDrawerTaskId(null)} />
+      )}
 
       {showCreate && (
         <div
@@ -242,4 +297,26 @@ export default function TasksPage() {
       )}
     </div>
   );
+}
+
+function holdingColor(status: Task["status"]): string {
+  if (status === "snoozed") return "var(--amber)";
+  if (status === "blocked") return "var(--amber)";
+  if (status === "stale") return "var(--red)";
+  if (status === "abandoned") return "var(--muted)";
+  return "var(--muted)";
+}
+
+function holdingDetail(t: Task): string {
+  if (t.status === "snoozed" && t.snoozeUntil) {
+    return `wakes ${new Date(t.snoozeUntil).toLocaleDateString()}`;
+  }
+  if (t.status === "blocked" && t.blockedOn) {
+    return `on ${t.blockedOn}`;
+  }
+  if (t.status === "abandoned" && t.abandonReason) {
+    return t.abandonReason.length > 40 ? `${t.abandonReason.slice(0, 38)}…` : t.abandonReason;
+  }
+  if (t.status === "stale") return "aged out";
+  return "";
 }
