@@ -13,6 +13,16 @@ import { db, schema } from "../db/client.js";
 import { hmInTz, startOfDayInTz, endOfDayInTz } from "../lib/time.js";
 
 export type PlanBlock = { start: string; end: string; label: string; sub?: string; kind: string; hero?: boolean };
+// An activation-sized chunk emitted alongside the plan. Unlike blocks (which
+// can be wide meetings or deep-work windows), commitments are <=25min and
+// must be startable: each has a concrete first action and a verify criterion.
+export type PlanCommitment = {
+  title: string;
+  verifyCriterion?: string;
+  start: string; // HH:MM local
+  durationMin: number;
+  taskId?: string | null;
+};
 export type PlanInputs = {
   events: {
     title: string;
@@ -23,12 +33,13 @@ export type PlanInputs = {
     subscribed: boolean;
   }[];
   freeBlocks: { start: string; end: string }[];
-  tasks: { id: string; title: string; priority: string; due: string | null; estMin: number | null; status: string }[];
+  tasks: { id: string; title: string; priority: string; due: string | null; estMin: number | null; status: string; skipCount: number }[];
   guidance?: string;
 };
 export type DailyPlan = {
   summary: string;
   blocks: PlanBlock[];
+  commitments?: PlanCommitment[];
   generatedBy: string;
   inputs?: PlanInputs;
   fallbackReason?: string;
@@ -61,6 +72,7 @@ export async function generateDailyPlan(
       due: t.due ? t.due.toISOString() : null,
       estMin: t.estMin,
       status: t.status,
+      skipCount: (t as { skipCount?: number }).skipCount ?? 0,
     }));
 
   const inputs: PlanInputs = {
@@ -139,8 +151,8 @@ export async function generateDailyPlan(
     : "";
 
   const system =
-    "You are the Planner role of Cortex. Produce a realistic block-by-block plan for today as JSON:\n" +
-    `{ "summary": string, "blocks": [{ "start": "HH:MM", "end": "HH:MM", "label": string, "sub": string, "kind": "meeting"|"class"|"teach"|"personal"|"deadline"|"block", "hero": boolean? }] }\n` +
+    "You are the Planner role of Cortex. Produce a realistic block-by-block plan for today AND a short queue of commitments as JSON:\n" +
+    `{ "summary": string, "blocks": [{ "start": "HH:MM", "end": "HH:MM", "label": string, "sub": string, "kind": "meeting"|"class"|"teach"|"personal"|"deadline"|"block", "hero": boolean? }], "commitments": [{ "start": "HH:MM", "durationMin": number, "title": string, "verifyCriterion": string, "taskId": string? }] }\n` +
     `- All times in CONTEXT and in your output are local wall-clock HH:MM in ${tz}. Do not convert to UTC.\n` +
     "- Include every my_events entry as a block — these are the user's real commitments.\n" +
     "- subscribed_events are from calendars the user is subscribed to but does NOT own (e.g. class calendars listing all staff office hours). The user is not attending these. Do NOT add them as blocks. Do NOT treat them as conflicts. You may reference one in a sub line only if clearly useful (e.g. \"prof's office hours open\").\n" +
@@ -149,6 +161,11 @@ export async function generateDailyPlan(
     "- Honor `preferences` as hard guidance (e.g. schedule.deep_work_window, calendar.default_block_minutes, study.session_length_minutes). High-confidence preferences override defaults.\n" +
     "- Use `tendencies` as soft signals about when the user works best.\n" +
     "- Read `recent_journal` for patterns in past reflections: if a block type has been rated ≤2 multiple times (e.g. late-evening deep work), avoid scheduling the same shape today. Reflect the adjustment in the block's `sub` line when it's load-bearing (e.g. \"moved from evening — prior sessions rated 2/5\").\n" +
+    "- COMMITMENTS: emit 3 to 6 commitments for the day, each tied to a real open task. Each commitment is an activation-sized first action the user can start in <=25 minutes. " +
+    "Reject abstract titles like \"work on thesis\" or \"study\"; require a concrete startable verb + object, e.g. \"open draft doc and write the intro paragraph\" or \"skim the first 3 pages of the dataset paper\". " +
+    "durationMin must be between 10 and 25 for activation chunks; use 45 only for a single hero deep-work commitment if it maps to the hero block. " +
+    "verifyCriterion is the one-line artifact the user will produce — something they can state in a sentence (e.g. \"a 3-paragraph intro saved to the draft doc\"). " +
+    "Commitments must start inside free_blocks (never during my_events). Tasks with a high skipCount should be given SHORTER, more-concrete commitments and placed earlier in the day when possible. taskId must be an id from the tasks list or null if purely fresh.\n" +
     "- Keep summary under 160 chars. Return JSON only." +
     guidanceClause;
 
@@ -162,11 +179,16 @@ export async function generateDailyPlan(
       ],
     });
     const text = result?.text ?? "";
-    const extracted = extractJson<{ summary: string; blocks: PlanBlock[] }>(text);
+    const extracted = extractJson<{
+      summary: string;
+      blocks: PlanBlock[];
+      commitments?: PlanCommitment[];
+    }>(text);
     if (extracted.ok) {
       return {
         summary: extracted.value.summary,
         blocks: extracted.value.blocks ?? [],
+        commitments: extracted.value.commitments ?? [],
         generatedBy: `planner:${cfg.provider}/${cfg.model}${extracted.repaired ? " (repaired-json)" : ""}`,
         inputs,
       };

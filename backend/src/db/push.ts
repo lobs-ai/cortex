@@ -10,6 +10,9 @@ export function applySchema(): void {
   addColumnIfMissing("notifications", "acted_at", "INTEGER");
   addColumnIfMissing("notifications", "action_op", "TEXT");
   addColumnIfMissing("notifications", "snoozed_until", "INTEGER");
+  addColumnIfMissing("notifications", "requires_ack", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing("tasks", "skip_count", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing("tasks", "last_missed_at", "INTEGER");
 }
 
 function addColumnIfMissing(table: string, column: string, definition: string) {
@@ -135,6 +138,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   acted_at INTEGER,
   action_op TEXT,
   snoozed_until INTEGER,
+  requires_ack INTEGER NOT NULL DEFAULT 0,
   related_object_type TEXT,
   related_object_id TEXT,
   created_at INTEGER NOT NULL
@@ -262,6 +266,37 @@ CREATE TABLE IF NOT EXISTS provider_api_keys (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS commitments (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  task_id TEXT,
+  parent_commitment_id TEXT,
+  title TEXT NOT NULL,
+  verify_criterion TEXT,
+  start_time INTEGER NOT NULL,
+  duration_min INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  source TEXT NOT NULL DEFAULT 'user',
+  escalation_level INTEGER NOT NULL DEFAULT 0,
+  prompted_at INTEGER,
+  acked_at INTEGER,
+  completed_at INTEGER,
+  artifact TEXT,
+  skip_reason TEXT,
+  notification_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS commitment_events (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  commitment_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  payload_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS scheduled_blocks (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -304,6 +339,9 @@ CREATE INDEX IF NOT EXISTS idx_journal_user_created ON journal_entries (user_id,
 CREATE INDEX IF NOT EXISTS idx_journal_user_event ON journal_entries (user_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_agent_proposals_user_key ON agent_proposals (user_id, source_key);
 CREATE INDEX IF NOT EXISTS idx_agent_proposals_user_created ON agent_proposals (user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_commitments_user_state_start ON commitments (user_id, state, start_time);
+CREATE INDEX IF NOT EXISTS idx_commitments_user_start ON commitments (user_id, start_time);
+CREATE INDEX IF NOT EXISTS idx_commitment_events_cid ON commitment_events (commitment_id, at);
 `;
 
 // Direct run: `npm run db:push` invokes this file via tsx, so do the apply.

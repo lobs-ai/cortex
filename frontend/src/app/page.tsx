@@ -7,6 +7,7 @@ import { api, type Plan } from "@/lib/api";
 import { fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 import { Dot, PriorityChip, ProjectTag } from "@/components/Primitives";
+import { NowCard } from "@/components/NowCard";
 
 export default function DashboardPage() {
   const qc = useQueryClient();
@@ -130,6 +131,10 @@ export default function DashboardPage() {
             {alerts.find((a) => a.kind === "deadline_risk")?.title ?? "none"}
           </div>
         </div>
+      </div>
+
+      <div style={{ padding: "0 18px 4px" }}>
+        <NowCard />
       </div>
 
       <div

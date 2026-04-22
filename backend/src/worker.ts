@@ -1,9 +1,16 @@
 import { DEMO_USER_ID } from "./lib/user.js";
 import { runMonitor } from "./ai/monitor.js";
+import { runCommitmentMonitor } from "./ai/commitmentMonitor.js";
+import { runDailyReview } from "./ai/review.js";
 import { syncCalendar } from "./services/googleCalendar.js";
 import { db, schema } from "./db/client.js";
 import { newId } from "./lib/ids.js";
-import { CALENDAR_INTERVAL_MS, MONITOR_INTERVAL_MS } from "./lib/schedules.js";
+import {
+  CALENDAR_INTERVAL_MS,
+  COMMITMENT_INTERVAL_MS,
+  DAILY_REVIEW_INTERVAL_MS,
+  MONITOR_INTERVAL_MS,
+} from "./lib/schedules.js";
 import { regenerateDailyPlan } from "./services/plans.js";
 import { createNotification, listActiveNotifications } from "./services/notifications.js";
 
@@ -96,7 +103,35 @@ async function calendarTick() {
   }
 }
 
+async function commitmentTick() {
+  try {
+    const r = await runCommitmentMonitor(DEMO_USER_ID);
+    if (r.prompted + r.escalated + r.missed + r.verifyAsked > 0) {
+      console.log(
+        `commitments: ${r.prompted} prompted, ${r.escalated} escalated, ${r.verifyAsked} verify asked, ${r.missed} missed`,
+      );
+    }
+  } catch (err) {
+    console.error("commitment monitor error:", err);
+  }
+}
+
+async function dailyReviewTick() {
+  try {
+    const res = await runDailyReview(DEMO_USER_ID);
+    if (res.ran) {
+      console.log(
+        `daily review: ${res.done} done, ${res.skipped} skipped, ${res.missed} missed`,
+      );
+    }
+  } catch (err) {
+    console.error("daily review error:", err);
+  }
+}
+
 console.log("cortex worker starting");
-await Promise.all([monitorTick(), calendarTick()]);
+await Promise.all([monitorTick(), calendarTick(), commitmentTick(), dailyReviewTick()]);
 setInterval(monitorTick, MONITOR_INTERVAL_MS);
 setInterval(calendarTick, CALENDAR_INTERVAL_MS);
+setInterval(commitmentTick, COMMITMENT_INTERVAL_MS);
+setInterval(dailyReviewTick, DAILY_REVIEW_INTERVAL_MS);

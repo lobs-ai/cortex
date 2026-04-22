@@ -48,6 +48,7 @@ const hydrate = (r: Row) => ({
   actedAt: r.actedAt,
   actionOp: r.actionOp,
   snoozedUntil: r.snoozedUntil,
+  requiresAck: !!r.requiresAck,
 });
 
 // "Active" = not dismissed, not snoozed past now. Rows with snoozedUntil in
@@ -138,6 +139,7 @@ export async function createNotification(
     body: string;
     actions?: NotificationAction[] | string[];
     category?: string;
+    requiresAck?: boolean;
     relatedObjectType?: string | null;
     relatedObjectId?: string | null;
   },
@@ -156,11 +158,22 @@ export async function createNotification(
     body: input.body,
     actionsJson: JSON.stringify(normalized),
     deliveryChannel: "web",
+    requiresAck: !!input.requiresAck,
     relatedObjectType: input.relatedObjectType ?? null,
     relatedObjectId: input.relatedObjectId ?? null,
     createdAt: new Date(),
   });
   return id;
+}
+
+// Flip requires_ack off (e.g. once the user has acted on the commitment,
+// so the nag row stops being "sticky"). Separate from dismiss — the row
+// stays visible but can now be dismissed normally.
+export async function clearRequiresAck(userId: string, id: string) {
+  await db
+    .update(schema.notifications)
+    .set({ requiresAck: false })
+    .where(and(eq(schema.notifications.userId, userId), eq(schema.notifications.id, id)));
 }
 
 function startOfLocalDay(d: Date): Date {

@@ -180,6 +180,33 @@ export type JournalEntry = {
   updatedAt: string;
 };
 
+export type Commitment = {
+  id: string;
+  taskId: string | null;
+  parentCommitmentId: string | null;
+  title: string;
+  verifyCriterion: string | null;
+  startTime: string;
+  durationMin: number;
+  state: "pending" | "prompted" | "doing" | "done" | "skipped" | "missed";
+  source: "user" | "planner" | "replan";
+  escalationLevel: number;
+  promptedAt: string | null;
+  ackedAt: string | null;
+  completedAt: string | null;
+  artifact: string | null;
+  skipReason: string | null;
+  notificationId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CommitmentNow = {
+  current: Commitment | null;
+  upcoming: Commitment[];
+  today: { done: number; skipped: number; missed: number; total: number };
+};
+
 export type NearestEvent = {
   id: string;
   title: string;
@@ -279,6 +306,39 @@ export const api = {
       req<Plan>("/api/plans/generate", {
         method: "POST",
         body: JSON.stringify(body ?? {}),
+      }),
+  },
+  commitments: {
+    now: () => req<CommitmentNow>("/api/commitments/now"),
+    list: (from?: Date, to?: Date) => {
+      const qs = new URLSearchParams();
+      if (from) qs.set("from", from.toISOString());
+      if (to) qs.set("to", to.toISOString());
+      return req<Commitment[]>(`/api/commitments${qs.toString() ? `?${qs}` : ""}`);
+    },
+    create: (body: {
+      taskId?: string | null;
+      parentCommitmentId?: string | null;
+      title: string;
+      verifyCriterion?: string | null;
+      startTime: Date;
+      durationMin: number;
+    }) =>
+      req<Commitment>("/api/commitments", {
+        method: "POST",
+        body: JSON.stringify({ ...body, startTime: body.startTime.toISOString() }),
+      }),
+    ack: (id: string) =>
+      req<Commitment>(`/api/commitments/${id}/ack`, { method: "POST" }),
+    done: (id: string, artifact?: string) =>
+      req<Commitment>(`/api/commitments/${id}/done`, {
+        method: "POST",
+        body: JSON.stringify({ artifact }),
+      }),
+    skip: (id: string, reason: string) =>
+      req<Commitment>(`/api/commitments/${id}/skip`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
       }),
   },
   notifications: {

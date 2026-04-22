@@ -18,6 +18,8 @@ const hydrate = (r: Row) => ({
   energy: r.energyLevel,
   tags: r.tagsJson ? (JSON.parse(r.tagsJson) as string[]) : [],
   completedAt: r.completedAt,
+  skipCount: r.skipCount,
+  lastMissedAt: r.lastMissedAt,
   createdAt: r.createdAt,
   updatedAt: r.updatedAt,
 });

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { currentUser } from "../lib/user.js";
 import {
+  clearRequiresAck,
   dismissNotification,
   listActiveNotifications,
   recordAction,
@@ -9,6 +10,7 @@ import {
 import { regenerateDailyPlan } from "../services/plans.js";
 import { patchTask } from "../services/tasks.js";
 import { runMonitor } from "../ai/monitor.js";
+import { markDoing, markDone, markSkipped } from "../services/commitments.js";
 import { db, schema } from "../db/client.js";
 import { and, eq } from "drizzle-orm";
 
@@ -28,6 +30,12 @@ const KNOWN_OPS = new Set([
   "schedule_block",
   "show_plan",
   "view_tasks",
+  // Commitment loop — the "doing/done/skip" buttons on a commitment.prompt
+  // card feed these back through the same notification action path so the
+  // frontend and Discord pathways share wiring.
+  "commit.ack",
+  "commit.done",
+  "commit.skip",
 ]);
 
 export async function notificationRoutes(app: FastifyInstance) {
@@ -50,8 +58,11 @@ export async function notificationRoutes(app: FastifyInstance) {
   app.post("/api/notifications/:id/act", async (req, reply) => {
     const u = currentUser(req);
     const { id } = z.object({ id: z.string() }).parse(req.params);
-    const { op } = z
-      .object({ op: z.string().min(1).max(64) })
+    const { op, payload } = z
+      .object({
+        op: z.string().min(1).max(64),
+        payload: z.record(z.unknown()).optional(),
+      })
       .parse(req.body ?? {});
 
     const [existing] = await db
@@ -88,6 +99,27 @@ export async function notificationRoutes(app: FastifyInstance) {
       } else if (op === "reschedule_block") {
         await regenerateDailyPlan(u.id);
         effect = { kind: "plan_regenerated" };
+      } else if (op === "commit.ack" || op === "commit.done" || op === "commit.skip") {
+        if (existing.relatedObjectType !== "commitment" || !existing.relatedObjectId) {
+          effect = { kind: "handler_failed", reason: "no_commitment_link" };
+        } else {
+          const cid = existing.relatedObjectId;
+          const artifact = typeof payload?.artifact === "string" ? payload.artifact : undefined;
+          const reason = typeof payload?.reason === "string" ? payload.reason : "";
+          if (op === "commit.ack") {
+            const row = await markDoing(u.id, cid);
+            effect = { kind: "commit_doing", commitmentId: cid, state: row?.state ?? "unknown" };
+          } else if (op === "commit.done") {
+            const row = await markDone(u.id, cid, artifact);
+            effect = { kind: "commit_done", commitmentId: cid, state: row?.state ?? "unknown" };
+          } else {
+            const row = await markSkipped(u.id, cid, reason);
+            effect = { kind: "commit_skipped", commitmentId: cid, state: row?.state ?? "unknown" };
+            // Reslotting on skip runs out-of-band (planner) so the HTTP
+            // response stays cheap. Worker picks it up on next tick.
+          }
+          await clearRequiresAck(u.id, id);
+        }
       } else if (!KNOWN_OPS.has(op)) {
         effect = { kind: "recorded_only", reason: "unknown_op" };
       }

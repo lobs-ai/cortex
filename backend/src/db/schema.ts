@@ -94,6 +94,10 @@ export const tasks = sqliteTable("tasks", {
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
   completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+  // Rollups fed by the commitments loop. Used by planner to slot shorter
+  // activation chunks for tasks the user has been skipping.
+  skipCount: integer("skip_count").notNull().default(0),
+  lastMissedAt: integer("last_missed_at", { mode: "timestamp_ms" }),
 });
 
 export const reminders = sqliteTable("reminders", {
@@ -124,6 +128,7 @@ export const notifications = sqliteTable("notifications", {
   actedAt: integer("acted_at", { mode: "timestamp_ms" }),
   actionOp: text("action_op"),
   snoozedUntil: integer("snoozed_until", { mode: "timestamp_ms" }),
+  requiresAck: integer("requires_ack", { mode: "boolean" }).notNull().default(false),
   relatedObjectType: text("related_object_type"),
   relatedObjectId: text("related_object_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
@@ -271,6 +276,48 @@ export const agentProposals = sqliteTable("agent_proposals", {
   taskId: text("task_id"),
   reason: text("reason").notNull().default(""),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// Commitments — the atomic unit of the "commit → nag → verify" loop.
+// A commitment is an activation-sized (<=25min) chunk with a real start time.
+// State transitions are driven by the commitment monitor + user responses:
+//   pending → prompted (at startTime, ping sent)
+//   prompted → doing (user acks)
+//   prompted → missed (no ack within grace window)
+//   doing → done (user replies with artifact)
+//   doing → skipped (user declines with reason; triggers replan)
+//   doing → missed (end reached without done/skip)
+export const commitments = sqliteTable("commitments", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  taskId: text("task_id"),
+  parentCommitmentId: text("parent_commitment_id"),
+  title: text("title").notNull(),
+  verifyCriterion: text("verify_criterion"),
+  startTime: integer("start_time", { mode: "timestamp_ms" }).notNull(),
+  durationMin: integer("duration_min").notNull(),
+  state: text("state").notNull().default("pending"),
+  source: text("source").notNull().default("user"), // "user" | "planner" | "replan"
+  escalationLevel: integer("escalation_level").notNull().default(0),
+  promptedAt: integer("prompted_at", { mode: "timestamp_ms" }),
+  ackedAt: integer("acked_at", { mode: "timestamp_ms" }),
+  completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+  artifact: text("artifact"),
+  skipReason: text("skip_reason"),
+  notificationId: text("notification_id"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
+// Audit trail for commitment state transitions. Feeds the nightly daily review
+// and lets the planner learn which shapes the user actually does.
+export const commitmentEvents = sqliteTable("commitment_events", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  commitmentId: text("commitment_id").notNull(),
+  kind: text("kind").notNull(), // "prompt_sent" | "ack" | "done" | "skipped" | "missed" | "snooze" | "reslot"
+  at: integer("at", { mode: "timestamp_ms" }).notNull(),
+  payloadJson: text("payload_json"),
 });
 
 export const scheduledBlocks = sqliteTable("scheduled_blocks", {
