@@ -16,6 +16,7 @@ import { TaskCreate, TaskPatch } from "../schemas/tasks.js";
 import { EventCreate, EventPatch } from "../schemas/events.js";
 import { db, schema } from "../db/client.js";
 import { eq } from "drizzle-orm";
+import { localizeDates } from "../lib/time.js";
 
 export type ChatCard =
   | { kind: "plan"; title: string; blocks: { start: string; end: string; label: string; task?: string; event?: string }[] }
@@ -276,21 +277,24 @@ export async function chatReply(userId: string, userText: string, history: { rol
     .filter((t) => t.status === "done" && t.updatedAt && new Date(t.updatedAt) >= inDays(-7))
     .slice(0, 10);
 
-  const context = {
-    now: localTimeString(now, userTimezone),
-    timezone: userTimezone,
-    recentEvents: pastEvents.slice(-20),
-    todayEvents,
-    thisWeekEvents: thisWeekEvents.slice(0, 40),
-    laterEvents: laterEvents.slice(0, 40),
-    openTasks: openTasks.slice(0, 30),
-    recentlyDoneTasks,
-    projects: projects.filter((p) => p.status === "active"),
-    tendencies: tendencies.slice(0, 12),
-    preferences: preferences.slice(0, 20),
-    recentJournal: recentJournal.slice(0, 20),
-    awaitingReflection: awaitingReflection.slice(0, 10),
-  };
+  const context = localizeDates(
+    {
+      now,
+      timezone: userTimezone,
+      recentEvents: pastEvents.slice(-20),
+      todayEvents,
+      thisWeekEvents: thisWeekEvents.slice(0, 40),
+      laterEvents: laterEvents.slice(0, 40),
+      openTasks: openTasks.slice(0, 30),
+      recentlyDoneTasks,
+      projects: projects.filter((p) => p.status === "active"),
+      tendencies: tendencies.slice(0, 12),
+      preferences: preferences.slice(0, 20),
+      recentJournal: recentJournal.slice(0, 20),
+      awaitingReflection: awaitingReflection.slice(0, 10),
+    },
+    userTimezone,
+  );
 
   const system = [
     "You are Cortex, a personal AI executive assistant. Your job is to help the user get things done — not just advise, but actually act.",
@@ -350,7 +354,7 @@ export async function chatReply(userId: string, userText: string, history: { rol
     "- Reference concrete items from context (task titles, event names, times) rather than speaking in generalities.",
     "- Don't invent tasks or events not in the context.",
     "",
-    "Context is delivered as JSON below. Times are ISO-8601 in the user's timezone.",
+    `Context is delivered as JSON below. All timestamps are local wall-clock ISO-8601 in the user's timezone (${userTimezone}) — no 'Z' suffix, no offset. Do not convert to UTC.`,
     "",
     `CONTEXT:\n${JSON.stringify(context, null, 2)}`,
   ].join("\n");
@@ -517,13 +521,3 @@ function inDays(n: number) {
   return d;
 }
 
-function localTimeString(date: Date, tz: string): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false,
-  }).formatToParts(date);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
-  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}`;
-}

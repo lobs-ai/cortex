@@ -10,7 +10,7 @@ import { summarizeTasks } from "../services/tasks.js";
 import { listEntries, listEventsAwaitingReflection } from "../services/journal.js";
 import { listPreferences, listTendencies } from "../services/memory.js";
 import { getLatestPlan } from "../services/plans.js";
-import { hmInTz } from "../lib/time.js";
+import { hmInTz, localIsoInTz } from "../lib/time.js";
 import type { NotificationAction } from "../services/notifications.js";
 
 export type Insight = {
@@ -79,18 +79,18 @@ export async function generateInsights(userId: string): Promise<Insight[]> {
     upcoming: upcoming
       .filter((e) => !e.subscribed)
       .slice(0, 20)
-      .map((e) => ({ title: e.title, start: e.start.toISOString(), kind: e.kind, important: !!e.important })),
+      .map((e) => ({ title: e.title, start: localIsoInTz(e.start, tz), kind: e.kind, important: !!e.important })),
     tasks: taskDigest,
     journal: journal.map((j) => ({
       kind: j.kind,
       rating: j.rating,
       note: j.note,
       eventId: j.eventId,
-      at: j.createdAt instanceof Date ? j.createdAt.toISOString() : j.createdAt,
+      at: j.createdAt instanceof Date ? localIsoInTz(j.createdAt, tz) : j.createdAt,
     })),
     preferences: preferences.slice(0, 25).map((p) => ({ key: p.key, value: p.value, confidence: p.confidence })),
     tendencies: tendencies.slice(0, 15).map((t) => ({ text: t.text, confidence: t.confidence, evidence: t.evidence })),
-    awaitingReflection: awaitingReflection.slice(0, 6).map((e) => ({ id: e.id, title: e.title, end: e.end.toISOString() })),
+    awaitingReflection: awaitingReflection.slice(0, 6).map((e) => ({ id: e.id, title: e.title, end: localIsoInTz(e.end, tz) })),
     recentInsightKeys: recentInsights,
   };
 

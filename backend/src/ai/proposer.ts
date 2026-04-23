@@ -19,6 +19,7 @@ import { listEntries } from "../services/journal.js";
 import { listPreferences, listTendencies } from "../services/memory.js";
 import { listRecentNotifications } from "../services/notifications.js";
 import { TaskCreate } from "../schemas/tasks.js";
+import { localIsoInTz } from "../lib/time.js";
 
 export type ProposedTask = {
   title: string;
@@ -93,7 +94,7 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
   }));
 
   const ctx = {
-    nowIso: now.toISOString(),
+    nowIso: localIsoInTz(now, tz),
     timezone: tz,
     upcomingEvents: events
       .filter((e) => !e.subscribed)
@@ -101,8 +102,8 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
       .map((e) => ({
         id: e.id,
         title: e.title,
-        start: e.start.toISOString(),
-        end: e.end.toISOString(),
+        start: localIsoInTz(e.start, tz),
+        end: localIsoInTz(e.end, tz),
         kind: e.kind,
         important: !!e.important,
         description: e.description ?? null,
@@ -116,7 +117,7 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
       kind: j.kind,
       note: j.note,
       rating: j.rating,
-      at: j.createdAt instanceof Date ? j.createdAt.toISOString() : j.createdAt,
+      at: j.createdAt instanceof Date ? localIsoInTz(j.createdAt, tz) : j.createdAt,
     })),
     preferences: preferences
       .filter((p) => !p.key.startsWith("llm.role."))

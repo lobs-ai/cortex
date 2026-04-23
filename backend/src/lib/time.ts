@@ -43,6 +43,39 @@ function tzOffsetMinutes(instant: Date, tz: string): number {
   return (asIfUtc - +instant) / 60_000;
 }
 
+// Full local ISO-8601 wall-clock string in `tz`, e.g. "2026-04-22T14:00:00".
+// No Z, no offset — the string IS the local time. Use for any timestamp sent
+// to an LLM when the prompt says times are in the user's timezone.
+export function localIsoInTz(date: Date, tz: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  const hRaw = get("hour");
+  const h = hRaw === "24" ? "00" : hRaw;
+  return `${get("year")}-${get("month")}-${get("day")}T${h}:${get("minute")}:${get("second")}`;
+}
+
+// Deep-clone `value`, replacing every Date with its local ISO wall-clock in
+// `tz`. Default JSON.stringify emits UTC with a Z suffix, which silently
+// contradicts any prompt that claims times are local. Run context through
+// this before serializing.
+export function localizeDates<T>(value: T, tz: string): T {
+  if (value instanceof Date) return localIsoInTz(value, tz) as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => localizeDates(v, tz)) as unknown as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = localizeDates(v, tz);
+    }
+    return out as T;
+  }
+  return value;
+}
+
 // UTC instant corresponding to local midnight (in tz) of the day `anchor` falls on.
 export function startOfDayInTz(anchor: Date, tz: string): Date {
   const { y, m, d } = ymdInTz(anchor, tz);
