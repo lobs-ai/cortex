@@ -10,7 +10,9 @@ import {
   createTask,
   findSemanticDuplicate,
   listTasks,
+  normalizeTokens,
   summarizeTasks,
+  titleSimilarity,
 } from "../services/tasks.js";
 import { listProjects } from "../services/projects.js";
 import { listEntries } from "../services/journal.js";
@@ -57,9 +59,12 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
   const last14 = new Date(+now - 14 * 24 * 60 * 60 * 1000);
   const in21d = new Date(+now + 21 * 24 * 60 * 60 * 1000);
 
-  const [taskDigest, openTasksRaw, events, projects, journal, preferences, tendencies, recentKeys, recentNotifications] =
+  const [taskDigest, allLive, events, projects, journal, preferences, tendencies, recentKeys, recentNotifications] =
     await Promise.all([
       summarizeTasks(userId, { openLimit: 30, recentDoneDays: 14, recentDoneLimit: 20 }),
+      // Full non-terminal set — planner uses `playable`, but the proposer
+      // must see snoozed/blocked/stale too, otherwise it re-creates tasks
+      // that are paused or aged-out but already captured.
       listTasks(userId, { openOnly: true }),
       listEvents(userId, { from: now, to: in21d }),
       listProjects(userId),
@@ -76,6 +81,16 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
   const recentlyShownNotificationTitles = recentNotifications
     .slice(0, 30)
     .map((n) => n.title);
+
+  // Full live surface the LLM must not duplicate against. Includes state
+  // so it understands a "snoozed" row is still a commitment — not just an
+  // idle reminder worth re-creating.
+  const existingTasksForDedup = allLive.slice(0, 80).map((t) => ({
+    id: t.id,
+    title: t.title,
+    status: t.status,
+    normalized: normalizeTokens(t.title).join(" "),
+  }));
 
   const ctx = {
     nowIso: now.toISOString(),
@@ -96,6 +111,7 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
       .filter((p) => p.status === "active")
       .map((p) => ({ id: p.id, name: p.name, description: p.description, targetDate: p.targetDate })),
     tasks: taskDigest,
+    existingTasksForDedup,
     recentJournal: journal.slice(0, 20).map((j) => ({
       kind: j.kind,
       note: j.note,
@@ -122,8 +138,10 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
     "",
     "## What NOT to propose",
     "- Anything whose sourceKey appears in alreadyProposedSourceKeys — that was already handled.",
-    "- Anything whose title is a near-duplicate of a task in tasks.topOpen or tasks.recentlyCompleted. Normalize casing/punctuation before comparing.",
+    "- CRITICAL: Before proposing, check existingTasksForDedup. That is the COMPLETE live task list (inbox, today, doing, snoozed, blocked, stale). If any row there means the same thing as what you'd propose — even if worded differently — DO NOT propose it. A snoozed task is still a task; a stale task is still captured. Match on intent, not exact wording. Examples of duplicates you must skip: 'Write thesis intro' vs 'Draft the introduction for thesis'; 'Email Sarah about review' vs 'Follow up with Sarah on review'; 'Fix auth bug' vs 'Resolve auth regression'. When unsure, don't propose.",
+    "- Anything whose title is a near-duplicate of a task in tasks.recentlyCompleted. Normalize casing/punctuation before comparing.",
     "- Anything whose intent duplicates a title in recentlyShownNotificationTitles — the user already saw a proactive card about that and doesn't need the same thing reworded as a task.",
+    "- Two of your own proposals cannot overlap in intent. If you find yourself writing two sub-tasks that are really the same work, emit one.",
     "- Tasks for subscribed (FYI) events — those are already filtered out of upcomingEvents.",
     "- Vague tasks like 'work on project' or 'study more'. Every task must be concrete enough that the user could start it in the next 30 minutes.",
     "- Tasks with no clear due date AND no clear project. If you can't place it in time or in a project, it's probably not ready to be a task.",
@@ -153,12 +171,11 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
     return { created: [], skipped: 0 };
   }
 
-  const normalizedExisting = new Set<string>([
-    ...openTasksRaw.map((t) => normalizeTitle(t.title)),
-    ...taskDigest.recentlyCompleted.map((t) => normalizeTitle(t.title)),
-  ]);
   const recentKeySet = new Set(recentKeys);
   const projectIds = new Set(projects.map((p) => p.id));
+  // Accepted proposals so far in this batch — used to prevent the LLM from
+  // emitting two near-duplicate items in the same response.
+  const acceptedTitles: string[] = [];
 
   const created: ProposerResult["created"] = [];
   let skipped = 0;
@@ -171,18 +188,36 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
     const key = p.sourceKey.toLowerCase().replace(/[^a-z0-9_]+/g, "_").slice(0, 48);
     if (recentKeySet.has(key)) {
       skipped++;
+      console.log(`proposer: skipped dup sourceKey "${key}"`);
       continue;
     }
-    if (normalizedExisting.has(normalizeTitle(p.title))) {
-      skipped++;
-      continue;
-    }
-    // Shared dedup — catches rows in non-terminal states including snoozed,
-    // blocked, and stale. Prevents proposing "email Sarah" while one is
-    // already snoozed until next week.
+    // Fuzzy match against the full live task set (including snoozed/
+    // blocked/stale). This catches everything the LLM should have caught
+    // and didn't — "write intro" vs "draft introduction" etc.
     const dup = await findSemanticDuplicate(userId, p.title);
     if (dup) {
       skipped++;
+      console.log(
+        `proposer: skipped "${p.title}" — overlaps existing "${dup.title}" (score ${dup.score.toFixed(2)}, status ${dup.status})`,
+      );
+      continue;
+    }
+    // Self-batch dedup: two proposals in the same run can't collide.
+    const selfDup = acceptedTitles.find((t) => titleSimilarity(p.title, t) >= 0.7);
+    if (selfDup) {
+      skipped++;
+      console.log(`proposer: skipped "${p.title}" — collides with earlier "${selfDup}" in batch`);
+      continue;
+    }
+    // Also block if a recently-completed task matches — "do laundry" done
+    // yesterday shouldn't get re-proposed unless the LLM explicitly
+    // justifies a fresh instance (not today).
+    const recentlyDone = taskDigest.recentlyCompleted.find(
+      (t) => titleSimilarity(p.title, t.title) >= 0.7,
+    );
+    if (recentlyDone) {
+      skipped++;
+      console.log(`proposer: skipped "${p.title}" — recently completed as "${recentlyDone.title}"`);
       continue;
     }
 
@@ -215,7 +250,7 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
         createdAt: new Date(),
       });
       created.push({ id: row.id, title: row.title, reason: p.reason });
-      normalizedExisting.add(normalizeTitle(row.title));
+      acceptedTitles.push(row.title);
       recentKeySet.add(key);
     } catch (err) {
       console.error("task proposer insert failed:", err);
@@ -224,14 +259,6 @@ export async function proposeTasks(userId: string): Promise<ProposerResult> {
   }
 
   return { created, skipped };
-}
-
-function normalizeTitle(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 async function recentProposalKeys(userId: string): Promise<string[]> {

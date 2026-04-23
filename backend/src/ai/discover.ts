@@ -1,4 +1,5 @@
 import { getActiveKey } from "../services/apiKeys.js";
+import { getActiveBaseUrl as getLmstudioBaseUrl } from "../services/lmstudioEndpoints.js";
 import { getProvider, type ProviderId } from "./registry.js";
 
 export type DiscoveredModel = { id: string; label: string; note?: string };
@@ -24,8 +25,10 @@ export async function discoverModels(
   }
 
   const baseUrl =
-    entry.baseUrl ??
-    (entry.transport === "openai" ? "https://api.openai.com/v1" : null);
+    provider === "lmstudio"
+      ? await getLmstudioBaseUrl(userId)
+      : entry.baseUrl ??
+        (entry.transport === "openai" ? "https://api.openai.com/v1" : null);
   if (!baseUrl) throw new Error(`no base URL configured for ${provider}`);
 
   return fetchOpenAICompatModels(baseUrl, apiKey, provider);
@@ -53,6 +56,10 @@ async function fetchAnthropicModels(apiKey: string): Promise<DiscoveredModel[]> 
       label: m.display_name || m.id,
       note: m.created_at ? relativeDate(m.created_at) : undefined,
     }));
+}
+
+export async function fetchLmstudioModelsAt(baseUrl: string): Promise<DiscoveredModel[]> {
+  return fetchOpenAICompatModels(baseUrl, null, "lmstudio");
 }
 
 async function fetchOpenAICompatModels(

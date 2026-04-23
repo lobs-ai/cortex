@@ -729,7 +729,41 @@ export const api = {
       activate: (id: string) =>
         req<{ ok: boolean }>(`/api/settings/keys/${id}/activate`, { method: "POST" }),
     },
+    lmstudio: {
+      list: () =>
+        req<LmstudioEndpoint[]>("/api/settings/lmstudio/endpoints"),
+      add: (body: { label: string; baseUrl: string }) =>
+        req<LmstudioEndpoint>("/api/settings/lmstudio/endpoints", {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+      update: (id: string, body: { label?: string; baseUrl?: string }) =>
+        req<{ ok: boolean }>(`/api/settings/lmstudio/endpoints/${id}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        }),
+      remove: (id: string) =>
+        req<{ ok: boolean }>(`/api/settings/lmstudio/endpoints/${id}`, {
+          method: "DELETE",
+        }),
+      activate: (id: string) =>
+        req<{ ok: boolean }>(`/api/settings/lmstudio/endpoints/${id}/activate`, {
+          method: "POST",
+        }),
+      models: (id: string) =>
+        req<{ baseUrl: string; models: { id: string; label: string; note?: string }[] }>(
+          `/api/settings/lmstudio/endpoints/${id}/models`,
+        ),
+    },
   },
+};
+
+export type LmstudioEndpoint = {
+  id: string;
+  label: string;
+  baseUrl: string;
+  isActive: boolean;
+  createdAt: string;
 };
 
 export type StoredKey = {

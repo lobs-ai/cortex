@@ -1,3 +1,5 @@
+import { and, eq, inArray } from "drizzle-orm";
+import { db, schema } from "../db/client.js";
 import {
   awakenSnoozed,
   findDuplicatePairs,
@@ -6,11 +8,17 @@ import {
   findWakeableSnoozes,
   listTaskEvents,
   markTaskStale,
+  titleSimilarity,
 } from "../services/tasks.js";
 import {
   createNotification,
   listRecentNotifications,
 } from "../services/notifications.js";
+import { complete } from "./client.js";
+import { extractJson } from "./jsonExtract.js";
+import { getActiveKey } from "../services/apiKeys.js";
+import { getProvider } from "./registry.js";
+import { getRoleModel } from "../services/settings.js";
 
 // The gardener keeps the task list alive: wakes snoozed rows, nudges
 // timed-out blocks, ages captured rows out to "stale," and proposes merges
@@ -37,6 +45,16 @@ export async function runGardener(userId: string): Promise<GardenerResult> {
   let staled = 0;
   let dupeProposals = 0;
   let killProposals = 0;
+
+  // Run the LLM semantic dedup first. It emits its own notifications with
+  // the same `task.dup` kind, so the cooldown window already in place
+  // prevents the heuristic pass below from double-flagging the same pair.
+  try {
+    const llmPairs = await llmDedupPass(userId);
+    dupeProposals += await emitMergeProposals(userId, llmPairs, "llm");
+  } catch (err) {
+    console.warn("gardener llm dedup failed:", err);
+  }
 
   // 1. Wake snoozes whose time has come. Moves them back to inbox and logs
   //    'awoken' — the TriageCard will pick them up.
@@ -112,36 +130,158 @@ export async function runGardener(userId: string): Promise<GardenerResult> {
     killProposals++;
   }
 
-  // 4. Propose merges for normalized-title duplicates. Canonical = older
-  //    row; the duplicate is the one we'd merge into it. One notification
-  //    per pair, dedup'd by the duplicate id.
-  const dupes = await findDuplicatePairs(userId);
-  const recentMergeKeys = new Set(
+  // 4. Heuristic fuzzy-match pairs. Catches whatever the LLM pass didn't
+  //    find (or everything, if no LLM key is configured).
+  const heuristicPairs = (await findDuplicatePairs(userId)).map((p) => ({
+    canonicalId: p.canonical.id,
+    canonicalTitle: p.canonical.title,
+    duplicateId: p.duplicate.id,
+    duplicateTitle: p.duplicate.title,
+    score: p.score,
+  }));
+  dupeProposals += await emitMergeProposals(userId, heuristicPairs, "heuristic");
+
+  return { awoken, blockedSurfaced, staled, dupeProposals, killProposals };
+}
+
+type MergePair = {
+  canonicalId: string;
+  canonicalTitle: string;
+  duplicateId: string;
+  duplicateTitle: string;
+  score: number;
+};
+
+// Emit one notification per pair, deduped against existing open `task.dup`
+// cards for the same duplicate id so the user isn't re-nagged.
+async function emitMergeProposals(
+  userId: string,
+  pairs: MergePair[],
+  origin: "llm" | "heuristic",
+): Promise<number> {
+  if (pairs.length === 0) return 0;
+  const since = new Date(Date.now() - PROPOSAL_COOLDOWN_MS);
+  const recent = await listRecentNotifications(userId, since);
+  const recentDupIds = new Set(
     recent.filter((n) => n.kind === "task.dup").map((n) => n.relatedId ?? ""),
   );
-  for (const { canonical, duplicate } of dupes) {
-    if (recentMergeKeys.has(duplicate.id)) continue;
+  let emitted = 0;
+  for (const p of pairs) {
+    if (recentDupIds.has(p.duplicateId)) continue;
     await createNotification(userId, {
       severity: "low",
       kind: "task.dup",
-      title: `Possible duplicate: "${duplicate.title}"`,
-      body: `Looks like "${canonical.title}" (older). Merge into the older one, keep both, or abandon the new one?`,
+      title: `Possible duplicate: "${p.duplicateTitle}"`,
+      body:
+        origin === "llm"
+          ? `AI thinks this is the same as "${p.canonicalTitle}". Merge, keep both, or abandon?`
+          : `Looks like "${p.canonicalTitle}" (${Math.round(p.score * 100)}% match). Merge, keep both, or abandon?`,
       actions: [
         { label: "Merge into older", op: "task.merge_into_canonical" },
         { label: "Keep both", op: "task.keep" },
         { label: "Abandon this one", op: "task.abandon_open" },
       ],
       relatedObjectType: "task",
-      relatedObjectId: duplicate.id,
-      // Pass the canonical id through via a secondary channel — we encode
-      // it in the body above and also in a structured way by piggybacking
-      // on relatedObjectType. For the action handler, we'll look it up
-      // again from findSemanticDuplicate to avoid state drift.
+      relatedObjectId: p.duplicateId,
     });
-    dupeProposals++;
+    emitted++;
+  }
+  return emitted;
+}
+
+// Ask the monitor-role LLM to find semantic duplicates in the current live
+// task set. Only runs when a provider + key are configured. The prompt
+// gives the LLM the full non-terminal task list with status and asks for
+// clusters it is at least 80% confident are the same work. Lower than that
+// and the heuristic pass catches it anyway.
+async function llmDedupPass(userId: string): Promise<MergePair[]> {
+  const cfg = await getRoleModel(userId, "monitor");
+  const entry = getProvider(cfg.provider);
+  if (!entry) return [];
+  if (entry.requiresApiKey) {
+    const key = await getActiveKey(userId, cfg.provider);
+    if (!key) return [];
   }
 
-  return { awoken, blockedSurfaced, staled, dupeProposals, killProposals };
+  const rows = await db
+    .select()
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.userId, userId),
+        inArray(schema.tasks.status, [
+          "inbox",
+          "today",
+          "doing",
+          "snoozed",
+          "blocked",
+          "stale",
+        ]),
+      ),
+    );
+  if (rows.length < 2) return [];
+
+  const tasks = rows.slice(0, 120).map((r) => ({
+    id: r.id,
+    title: r.title,
+    status: r.status,
+    description: r.description?.slice(0, 200) ?? null,
+  }));
+
+  const system = [
+    "You are Cortex's deduplicator. Given a list of the user's active tasks, identify clusters that represent the SAME intended work even if worded differently.",
+    "Rules:",
+    "- 'Write thesis intro' and 'Draft the introduction for my thesis' ARE duplicates.",
+    "- 'Email Sarah about review' and 'Follow up with Sarah on the review' ARE duplicates.",
+    "- 'Fix login bug' and 'Fix signup bug' are NOT duplicates (different feature).",
+    "- 'Study chapter 4' and 'Study chapter 5' are NOT duplicates (different scope).",
+    "- Don't propose a merge unless you are at least 80% confident.",
+    "- Within a cluster, pick the ONE canonical task. Prefer the one with clearer wording; if unclear, pick the shorter one.",
+    "- Skip clusters that are just different sub-steps of a larger effort (those belong under the same project, not merged).",
+    "Return JSON only:",
+    `{"clusters": [{"canonicalId": string, "duplicateIds": string[], "reason": string (<120 chars)}]}`,
+    "If no duplicates found, return {\"clusters\": []}. Silence is better than wrong merges.",
+  ].join("\n");
+
+  let result: { clusters?: Array<{ canonicalId?: string; duplicateIds?: string[]; reason?: string }> } = {};
+  try {
+    const out = await complete(userId, cfg.provider, cfg.model, {
+      system,
+      maxTokens: 800,
+      messages: [{ role: "user", content: `TASKS:\n${JSON.stringify(tasks, null, 2)}` }],
+    });
+    const parsed = extractJson<typeof result>(out?.text ?? "");
+    if (!parsed.ok) return [];
+    result = parsed.value;
+  } catch (err) {
+    console.warn("llm dedup call failed:", err);
+    return [];
+  }
+
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const pairs: MergePair[] = [];
+  for (const c of result.clusters ?? []) {
+    const canonical = c.canonicalId ? byId.get(c.canonicalId) : null;
+    if (!canonical) continue;
+    for (const dupId of c.duplicateIds ?? []) {
+      if (dupId === canonical.id) continue;
+      const dup = byId.get(dupId);
+      if (!dup) continue;
+      // Sanity check — don't emit a "merge" that the normalized score
+      // says is obviously unrelated (<0.3). Stops LLM hallucinations
+      // from polluting the triage card.
+      const score = titleSimilarity(canonical.title, dup.title);
+      if (score < 0.3) continue;
+      pairs.push({
+        canonicalId: canonical.id,
+        canonicalTitle: canonical.title,
+        duplicateId: dup.id,
+        duplicateTitle: dup.title,
+        score: Math.max(score, 0.8), // LLM said ≥80%, trust it
+      });
+    }
+  }
+  return pairs;
 }
 
 // Used by the timeline drawer on the task detail page: returns the event

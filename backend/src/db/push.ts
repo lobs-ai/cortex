@@ -28,6 +28,9 @@ export function applySchema(): void {
   addColumnIfMissing("tasks", "stale_at", "INTEGER");
   addColumnIfMissing("tasks", "triaged_at", "INTEGER");
   addColumnIfMissing("tasks", "last_activity_at", "INTEGER");
+  // Indexes that depend on columns added above must come after the ALTERs —
+  // otherwise an old database that predates the column fails at boot.
+  rawDb.exec(POST_ALTER_INDEXES);
 }
 
 function addColumnIfMissing(table: string, column: string, definition: string) {
@@ -384,6 +387,12 @@ CREATE INDEX IF NOT EXISTS idx_commitments_user_state_start ON commitments (user
 CREATE INDEX IF NOT EXISTS idx_commitments_user_start ON commitments (user_id, start_time);
 CREATE INDEX IF NOT EXISTS idx_commitment_events_cid ON commitment_events (commitment_id, at);
 CREATE INDEX IF NOT EXISTS idx_task_events_tid ON task_events (task_id, at);
+`;
+
+// Indexes on columns introduced via addColumnIfMissing — must run after
+// applySchema's ALTER pass, not as part of the main DDL block, or a fresh
+// boot against an older database will error before the column exists.
+const POST_ALTER_INDEXES = `
 CREATE INDEX IF NOT EXISTS idx_tasks_canonical ON tasks (user_id, canonical_task_id);
 `;
 

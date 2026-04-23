@@ -113,15 +113,31 @@ export async function generateDailyPlan(
 
   const myEvents = events.filter((e) => !e.subscribed);
   const subscribedEvents = events.filter((e) => e.subscribed);
+  // Split today's events into already-happened vs still-upcoming relative
+  // to the regen moment. The planner should not re-plan around a 10am
+  // meeting if it's 11am — past events are context, not constraints.
+  const nowMs = Date.now();
+  const pastEvents = myEvents.filter((e) => +e.end <= nowMs);
+  const upcomingMyEvents = myEvents.filter((e) => +e.end > nowMs);
+  // Free blocks must also respect current time — a block that ended an
+  // hour ago isn't free, it's gone.
+  const upcomingFree = free.filter((b) => +b.end > nowMs);
   const context = {
     date: date.toISOString().slice(0, 10),
+    now: hmInTz(new Date(), tz),
     timezone: tz,
-    my_events: myEvents.map((e) => ({
+    my_events: upcomingMyEvents.map((e) => ({
       title: e.title,
       start: hmInTz(e.start, tz),
       end: hmInTz(e.end, tz),
       kind: e.kind,
       location: e.location,
+    })),
+    already_happened: pastEvents.slice(-8).map((e) => ({
+      title: e.title,
+      start: hmInTz(e.start, tz),
+      end: hmInTz(e.end, tz),
+      kind: e.kind,
     })),
     subscribed_events: subscribedEvents.map((e) => ({
       title: e.title,
@@ -130,7 +146,7 @@ export async function generateDailyPlan(
       kind: e.kind,
       location: e.location,
     })),
-    free_blocks: free.map((b) => ({ start: hmInTz(b.start, tz), end: hmInTz(b.end, tz) })),
+    free_blocks: upcomingFree.map((b) => ({ start: hmInTz(b.start, tz), end: hmInTz(b.end, tz) })),
     tasks: topTasks,
     preferences: preferences
       .filter((p) => !p.key.startsWith("llm.role."))
@@ -154,14 +170,16 @@ export async function generateDailyPlan(
     "You are the Planner role of Cortex. Produce a realistic block-by-block plan for today AND a short queue of commitments as JSON:\n" +
     `{ "summary": string, "blocks": [{ "start": "HH:MM", "end": "HH:MM", "label": string, "sub": string, "kind": "meeting"|"class"|"teach"|"personal"|"deadline"|"block", "hero": boolean? }], "commitments": [{ "start": "HH:MM", "durationMin": number, "title": string, "verifyCriterion": string, "taskId": string? }] }\n` +
     `- All times in CONTEXT and in your output are local wall-clock HH:MM in ${tz}. Do not convert to UTC.\n` +
-    "- Include every my_events entry as a block — these are the user's real commitments.\n" +
+    "- CONTEXT.now is the current wall-clock time. Every block and every commitment you emit must start at or after CONTEXT.now — never schedule into the past.\n" +
+    "- my_events contains ONLY events that have not yet ended. Include each as a block.\n" +
+    "- already_happened is today's completed events for context — do NOT include these as blocks. If the most recent completed event likely generated action items (a meeting, a review, a presentation), you MAY emit one short follow-up commitment (<=15 min) titled concretely (e.g. 'send recap email to attendees', 'file the three action items in the project notes'). Only do this for the most recent completed event and only when the follow-up is obvious — don't fabricate follow-ups.\n" +
     "- subscribed_events are from calendars the user is subscribed to but does NOT own (e.g. class calendars listing all staff office hours). The user is not attending these. Do NOT add them as blocks. Do NOT treat them as conflicts. You may reference one in a sub line only if clearly useful (e.g. \"prof's office hours open\").\n" +
     "- Add at most one 'hero' block for the day's highest-priority deep work, marked hero: true.\n" +
     "- Respect the user's free blocks for any new 'block' entries.\n" +
     "- Honor `preferences` as hard guidance (e.g. schedule.deep_work_window, calendar.default_block_minutes, study.session_length_minutes). High-confidence preferences override defaults.\n" +
     "- Use `tendencies` as soft signals about when the user works best.\n" +
     "- Read `recent_journal` for patterns in past reflections: if a block type has been rated ≤2 multiple times (e.g. late-evening deep work), avoid scheduling the same shape today. Reflect the adjustment in the block's `sub` line when it's load-bearing (e.g. \"moved from evening — prior sessions rated 2/5\").\n" +
-    "- COMMITMENTS: emit 3 to 6 commitments for the day, each tied to a real open task. Each commitment is an activation-sized first action the user can start in <=25 minutes. " +
+    "- COMMITMENTS: emit 3 to 6 commitments for the REMAINDER of today (after CONTEXT.now), each tied to a real open task. Each commitment is an activation-sized first action the user can start in <=25 minutes. " +
     "Reject abstract titles like \"work on thesis\" or \"study\"; require a concrete startable verb + object, e.g. \"open draft doc and write the intro paragraph\" or \"skim the first 3 pages of the dataset paper\". " +
     "durationMin must be between 10 and 25 for activation chunks; use 45 only for a single hero deep-work commitment if it maps to the hero block. " +
     "verifyCriterion is the one-line artifact the user will produce — something they can state in a sentence (e.g. \"a 3-paragraph intro saved to the draft doc\"). " +
@@ -216,12 +234,21 @@ function heuristicPlan(
   tz: string,
 ): DailyPlan {
   const blocks: PlanBlock[] = [];
+  const nowMs = Date.now();
   const openTasks = tasks.filter((t) => t.status !== "done").sort((a, b) => (a.priority > b.priority ? 1 : -1));
   const hero = openTasks[0];
-  const heroSlot = free.find((b) => (+b.end - +b.start) / 60000 >= (hero?.estMin ?? 60));
+  // Only look for a hero slot in the future — a free block that ended two
+  // hours ago can't host deep work.
+  const upcomingFree = free.filter((b) => +b.end > nowMs);
+  const heroSlot = upcomingFree.find(
+    (b) => (+b.end - +b.start) / 60000 >= (hero?.estMin ?? 60),
+  );
 
   for (const e of events) {
     if (e.subscribed) continue; // class-wide / FYI calendars aren't the user's commitments
+    // Skip events already in the past — the user doesn't need them
+    // re-rendered as blocks when regenerating mid-day.
+    if (+e.end <= nowMs) continue;
     blocks.push({
       start: hmInTz(e.start, tz),
       end: hmInTz(e.end, tz),

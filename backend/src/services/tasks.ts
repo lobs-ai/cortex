@@ -471,27 +471,75 @@ const FILLER_WORDS = new Set([
 ]);
 
 export function normalizeTitle(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .split(/\s+/)
-    .filter((w) => w && !FILLER_WORDS.has(w))
-    .sort() // order-independent match: "email sarah" == "sarah email"
-    .join(" ")
-    .trim();
+  return normalizeTokens(title).join(" ");
 }
 
-// Returns the canonical duplicate if there's a confident match among the
-// user's non-terminal rows, else null. Ignores done/abandoned/merged rows
-// since those are closed — the user may legitimately want to do "email
-// Sarah" again a month later.
+// Stemmed, filler-free, sorted token list. Lets callers do set operations
+// (intersection / union / Jaccard) for fuzzy matching without re-running
+// the normalizer in multiple callers.
+export function normalizeTokens(title: string): string[] {
+  return Array.from(
+    new Set(
+      title
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 1 && !FILLER_WORDS.has(w))
+        .map(stem),
+    ),
+  ).sort();
+}
+
+// Cheap Porter-lite stemmer. "writing" → "write", "reviews" → "review",
+// "planning" → "plan". Prevents "write intro" / "writing intro" false
+// negatives without pulling a stemming library. Good enough for English
+// task titles.
+function stem(w: string): string {
+  if (w.length <= 3) return w;
+  const stripIng = w.replace(/(ing|ings)$/, "");
+  if (stripIng !== w && stripIng.length >= 3) return collapseDouble(stripIng);
+  const stripEd = w.replace(/(ed|edly)$/, "");
+  if (stripEd !== w && stripEd.length >= 3) return collapseDouble(stripEd);
+  const stripS = w.replace(/(ies|s)$/, (m) => (m === "ies" ? "y" : ""));
+  if (stripS !== w && stripS.length >= 3) return stripS;
+  return w;
+}
+function collapseDouble(w: string): string {
+  // "planning" → "plann" → "plan"
+  if (w.length >= 3 && w[w.length - 1] === w[w.length - 2]) return w.slice(0, -1);
+  return w;
+}
+
+// Jaccard-style containment score: |A∩B| / min(|A|,|B|). Asymmetric ratio
+// handles the "email sarah" ⊂ "email sarah about the review" case better
+// than classic Jaccard. 1.0 = one set fully contained in the other.
+export function titleSimilarity(a: string, b: string): number {
+  const A = new Set(normalizeTokens(a));
+  const B = new Set(normalizeTokens(b));
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const w of A) if (B.has(w)) inter++;
+  return inter / Math.min(A.size, B.size);
+}
+
+// Threshold at which two titles are considered the same task. Empirical —
+// 0.7 catches "finish the thesis intro" / "work on thesis introduction"
+// while rejecting "email Sarah" / "email Ben".
+const DUP_THRESHOLD = 0.7;
+
+// Returns the best-scoring live duplicate if one crosses DUP_THRESHOLD,
+// else null. Ignores done/abandoned/merged — those are closed (the user
+// may legitimately want to do "email Sarah" again a month later) — but
+// catches inbox, today, doing, snoozed, blocked, and stale, because a
+// dupe against a snoozed row is just as real as against an active one.
 export async function findSemanticDuplicate(
   userId: string,
   title: string,
-  opts: { ignoreId?: string } = {},
-): Promise<{ id: string; title: string; status: string } | null> {
-  const key = normalizeTitle(title);
-  if (!key) return null;
+  opts: { ignoreId?: string; threshold?: number } = {},
+): Promise<{ id: string; title: string; status: string; score: number } | null> {
+  const tokens = normalizeTokens(title);
+  if (tokens.length === 0) return null;
+  const threshold = opts.threshold ?? DUP_THRESHOLD;
   const rows = await db
     .select()
     .from(schema.tasks)
@@ -508,19 +556,23 @@ export async function findSemanticDuplicate(
         ]),
       ),
     );
+  let best: { id: string; title: string; status: string; score: number } | null = null;
   for (const r of rows) {
     if (opts.ignoreId && r.id === opts.ignoreId) continue;
-    if (normalizeTitle(r.title) === key) {
-      return { id: r.id, title: r.title, status: r.status };
+    const score = titleSimilarity(title, r.title);
+    if (score >= threshold && (!best || score > best.score)) {
+      best = { id: r.id, title: r.title, status: r.status, score };
     }
   }
-  return null;
+  return best;
 }
 
-// Pairs of likely duplicates across the current playable/held set. Returns
-// the younger row as the "candidate to merge into older." Used by the
-// gardener to propose merges.
-export async function findDuplicatePairs(userId: string) {
+// Full pairwise scan returning every cluster of likely-same rows. Older
+// row is canonical; everything else merges into it. Used by the gardener
+// to emit merge proposals. Unlike the strict-equality pass that used to
+// live here, this catches "write intro" + "draft introduction" + "intro
+// paragraph" as one cluster.
+export async function findDuplicateClusters(userId: string) {
   const rows = await db
     .select()
     .from(schema.tasks)
@@ -538,21 +590,45 @@ export async function findDuplicatePairs(userId: string) {
       ),
     )
     .orderBy(asc(schema.tasks.createdAt));
-  const byKey = new Map<string, typeof rows>();
-  for (const r of rows) {
-    const k = normalizeTitle(r.title);
-    if (!k) continue;
-    const arr = byKey.get(k) ?? [];
-    arr.push(r);
-    byKey.set(k, arr);
+
+  const used = new Set<string>();
+  const clusters: Array<{
+    canonical: (typeof rows)[number];
+    duplicates: Array<{ row: (typeof rows)[number]; score: number }>;
+  }> = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (used.has(rows[i].id)) continue;
+    const canonical = rows[i];
+    const dups: Array<{ row: (typeof rows)[number]; score: number }> = [];
+    for (let j = i + 1; j < rows.length; j++) {
+      if (used.has(rows[j].id)) continue;
+      const score = titleSimilarity(canonical.title, rows[j].title);
+      if (score >= DUP_THRESHOLD) {
+        dups.push({ row: rows[j], score });
+        used.add(rows[j].id);
+      }
+    }
+    if (dups.length > 0) {
+      used.add(canonical.id);
+      clusters.push({ canonical, duplicates: dups });
+    }
   }
-  const pairs: Array<{ canonical: (typeof rows)[number]; duplicate: (typeof rows)[number] }> = [];
-  for (const arr of byKey.values()) {
-    if (arr.length < 2) continue;
-    // First row (oldest by createdAt order) is canonical; every subsequent
-    // row is a duplicate candidate.
-    const [canonical, ...dups] = arr;
-    for (const dup of dups) pairs.push({ canonical, duplicate: dup });
+  return clusters;
+}
+
+// Flattened pair list from findDuplicateClusters. Kept for backward
+// compat with the gardener notification path.
+export async function findDuplicatePairs(userId: string) {
+  const clusters = await findDuplicateClusters(userId);
+  const pairs: Array<{
+    canonical: (typeof clusters)[number]["canonical"];
+    duplicate: (typeof clusters)[number]["duplicates"][number]["row"];
+    score: number;
+  }> = [];
+  for (const c of clusters) {
+    for (const d of c.duplicates) {
+      pairs.push({ canonical: c.canonical, duplicate: d.row, score: d.score });
+    }
   }
   return pairs;
 }

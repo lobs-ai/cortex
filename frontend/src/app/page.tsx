@@ -80,8 +80,8 @@ export default function DashboardPage() {
           </button>
           <button
             className="btn primary"
-            onClick={() => regen.mutate(undefined)}
-            disabled={regen.isPending}
+            onClick={() => setEditOpen(true)}
+            disabled={regen.isPending || !plan}
           >
             <Icon name="sparkles" size={14} /> {regen.isPending ? "Thinking…" : "Regenerate plan"}
           </button>
@@ -439,7 +439,7 @@ function EditPlanModal({
   onClose: () => void;
   onSubmit: (guidance: string) => void;
 }) {
-  const [guidance, setGuidance] = useState(plan.content.inputs?.guidance ?? "");
+  const [guidance, setGuidance] = useState("");
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -457,15 +457,15 @@ function EditPlanModal({
         style={{ width: 480, maxWidth: "92vw", background: "var(--panel)" }}
       >
         <div className="panel-hd">
-          <span className="title"><b>Edit plan</b></span>
+          <span className="title"><b>Regenerate plan</b></span>
           <button className="btn ghost" onClick={onClose} disabled={pending}><Icon name="x" size={12} /></button>
         </div>
         <div className="panel-bd" style={{ display: "grid", gap: 10 }}>
           <div className="muted" style={{ fontSize: 12 }}>
-            Tell Cortex how to replan. It will keep confirmed events and rebuild the rest around your guidance.
+            Add optional context so Cortex can adjust. Confirmed events stay put; the rest rebuilds around what you say.
           </div>
           <textarea
-            placeholder="e.g. move deep work to the morning, leave 4-5pm open for a walk, don't schedule anything before 9"
+            placeholder="e.g. dinner is at 5 tonight, push afternoon work back · leave 4-5pm open for a walk · no meetings before 9"
             value={guidance}
             onChange={(e) => setGuidance(e.target.value)}
             rows={4}
@@ -478,10 +478,10 @@ function EditPlanModal({
             <button className="btn ghost" onClick={onClose} disabled={pending}>Cancel</button>
             <button
               className="btn primary"
-              disabled={pending || !guidance.trim()}
+              disabled={pending}
               onClick={() => onSubmit(guidance.trim())}
             >
-              {pending ? "Replanning…" : "Replan"}
+              {pending ? "Replanning…" : guidance.trim() ? "Replan with context" : "Replan"}
             </button>
           </div>
         </div>

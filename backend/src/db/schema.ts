@@ -282,6 +282,16 @@ export const providerApiKeys = sqliteTable("provider_api_keys", {
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
 });
 
+export const lmstudioEndpoints = sqliteTable("lmstudio_endpoints", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  label: text("label").notNull(),
+  baseUrl: text("base_url").notNull(),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+});
+
 export const journalEntries = sqliteTable("journal_entries", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),

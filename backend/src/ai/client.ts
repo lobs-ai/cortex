@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "../env.js";
 import { getActiveKey } from "../services/apiKeys.js";
+import { getActiveBaseUrl as getLmstudioBaseUrl } from "../services/lmstudioEndpoints.js";
 import { getProvider, type ProviderId } from "./registry.js";
 
 export type ChatMsg = { role: "user" | "assistant"; content: string };
@@ -49,6 +50,18 @@ function resolveMaxTokens(provider: ProviderId, model: string, requested: number
   return base;
 }
 
+async function resolveBaseUrl(
+  userId: string,
+  provider: ProviderId,
+  entry: { baseUrl?: string; transport: string },
+): Promise<string | null> {
+  if (provider === "lmstudio") return getLmstudioBaseUrl(userId);
+  return (
+    entry.baseUrl ??
+    (entry.transport === "openai" ? "https://api.openai.com/v1" : null)
+  );
+}
+
 function getAnthropic(apiKey: string): Anthropic {
   let c = anthropicCache.get(apiKey);
   if (!c) {
@@ -94,9 +107,7 @@ export async function complete(
   }
 
   // OpenAI + OpenAI-compatible (openrouter, lmstudio, minimax, opencode-*, z-ai, kimi)
-  const baseUrl =
-    entry.baseUrl ??
-    (entry.transport === "openai" ? "https://api.openai.com/v1" : "");
+  const baseUrl = await resolveBaseUrl(userId, provider, entry);
   if (!baseUrl) return null;
 
   const headers: Record<string, string> = {
@@ -215,7 +226,7 @@ export async function completeWithTools(
   }
 
   // OpenAI-compatible
-  const baseUrl = entry.baseUrl ?? (entry.transport === "openai" ? "https://api.openai.com/v1" : "");
+  const baseUrl = await resolveBaseUrl(userId, provider, entry);
   if (!baseUrl) return null;
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };

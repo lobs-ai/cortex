@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Integration, type StoredKey } from "@/lib/api";
+import { api, type Integration, type LmstudioEndpoint, type StoredKey } from "@/lib/api";
 import {
   INTEGRATION_SPECS,
   type ConfigField,
@@ -115,6 +115,18 @@ function ModelsPane({
       return prev;
     });
   }, [settings]);
+
+  // LM Studio's curated list is just a placeholder — the real models come
+  // from the active endpoint. Fetch them on first render so the dropdown is
+  // usable without the user clicking ↻.
+  useEffect(() => {
+    const usesLmstudio = Object.values(drafts).some((c) => c.provider === "lmstudio")
+      || Object.values(settings).some((c) => c.provider === "lmstudio");
+    if (usesLmstudio && !discovered["lmstudio"] && !discovering["lmstudio"]) {
+      refreshModels("lmstudio");
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drafts, settings]);
 
   const save = useMutation({
     mutationFn: async (entries: [string, Cfg][]) => {
@@ -352,6 +364,296 @@ function KeysPane({ registry }: { registry: ProviderRegistry }) {
           busy={add.isPending || remove.isPending || activate.isPending}
         />
       ))}
+
+      {registry.providers.some((p) => p.id === "lmstudio") && <LmstudioEndpointsBlock />}
+    </div>
+  );
+}
+
+function LmstudioEndpointsBlock() {
+  const qc = useQueryClient();
+  const { data: endpoints = [] } = useQuery({
+    queryKey: ["lmstudio-endpoints"],
+    queryFn: () => api.settings.lmstudio.list(),
+  });
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["lmstudio-endpoints"] });
+  };
+  const add = useMutation({
+    mutationFn: (body: { label: string; baseUrl: string }) =>
+      api.settings.lmstudio.add(body),
+    onSuccess: invalidate,
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.settings.lmstudio.remove(id),
+    onSuccess: invalidate,
+  });
+  const activate = useMutation({
+    mutationFn: (id: string) => api.settings.lmstudio.activate(id),
+    onSuccess: invalidate,
+  });
+
+  const [label, setLabel] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [adding, setAdding] = useState(false);
+  const busy = add.isPending || remove.isPending || activate.isPending;
+  const canSubmit = label.trim().length > 0 && baseUrl.trim().length > 0;
+
+  const submit = () => {
+    if (!canSubmit) return;
+    add.mutate({ label: label.trim(), baseUrl: baseUrl.trim() });
+    setLabel("");
+    setBaseUrl("");
+    setAdding(false);
+  };
+
+  return (
+    <div style={{ border: "1px solid var(--hair)", background: "var(--bg)" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "8px 12px",
+          borderBottom: "1px solid var(--hair)",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 500 }}>LM Studio endpoints</div>
+          <div className="muted mono" style={{ fontSize: 10.5 }}>
+            {endpoints.length} stored · default http://localhost:1234/v1
+          </div>
+        </div>
+        {!adding && (
+          <button type="button" className="btn" onClick={() => setAdding(true)}>
+            + Add endpoint
+          </button>
+        )}
+      </div>
+
+      {adding && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "160px 1fr auto auto",
+            gap: 8,
+            padding: 10,
+            borderBottom: "1px solid var(--hair)",
+            alignItems: "center",
+          }}
+        >
+          <input
+            placeholder="label (e.g. desktop)"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            style={inputStyle}
+            autoFocus
+          />
+          <input
+            placeholder="http://192.168.1.50:1234/v1"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            className="btn primary"
+            disabled={!canSubmit || busy}
+            onClick={submit}
+          >
+            Save
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => {
+              setAdding(false);
+              setLabel("");
+              setBaseUrl("");
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {endpoints.length === 0 && !adding && (
+        <div className="muted" style={{ padding: "10px 12px", fontSize: 11.5 }}>
+          No endpoints saved. Falls back to{" "}
+          <span className="mono">http://localhost:1234/v1</span>.
+        </div>
+      )}
+
+      {endpoints.map((e: LmstudioEndpoint) => (
+        <LmstudioEndpointRow
+          key={e.id}
+          endpoint={e}
+          busy={busy}
+          onActivate={() => activate.mutate(e.id)}
+          onRemove={() => remove.mutate(e.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function LmstudioEndpointRow({
+  endpoint,
+  busy,
+  onActivate,
+  onRemove,
+}: {
+  endpoint: LmstudioEndpoint;
+  busy: boolean;
+  onActivate: () => void;
+  onRemove: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { data, isFetching, error, refetch } = useQuery({
+    queryKey: ["lmstudio-endpoint-models", endpoint.id],
+    queryFn: () => api.settings.lmstudio.models(endpoint.id),
+    enabled: expanded,
+    retry: false,
+  });
+  const errMsg = error instanceof Error ? error.message : error ? String(error) : null;
+
+  return (
+    <div style={{ borderBottom: "1px solid var(--hair)" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "20px 1fr 1fr auto auto",
+          gap: 10,
+          padding: "8px 12px",
+          alignItems: "center",
+        }}
+      >
+        <input
+          type="radio"
+          checked={endpoint.isActive}
+          onChange={onActivate}
+          disabled={busy}
+          title="Use this endpoint"
+        />
+        <div style={{ fontSize: 12.5 }}>
+          {endpoint.label}
+          {endpoint.isActive && (
+            <span
+              className="mono"
+              style={{
+                marginLeft: 8,
+                color: "var(--green)",
+                fontSize: 10,
+                textTransform: "uppercase",
+                letterSpacing: ".08em",
+              }}
+            >
+              active
+            </span>
+          )}
+        </div>
+        <div
+          className="mono muted"
+          style={{ fontSize: 11, overflow: "hidden", textOverflow: "ellipsis" }}
+        >
+          {endpoint.baseUrl}
+        </div>
+        <button
+          type="button"
+          className="btn ghost"
+          style={{ fontSize: 11 }}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "hide models" : "list models"}
+        </button>
+        <button
+          type="button"
+          className="btn ghost"
+          disabled={busy}
+          onClick={onRemove}
+          title="Remove"
+        >
+          <Icon name="x" size={11} />
+        </button>
+      </div>
+
+      {expanded && (
+        <div
+          style={{
+            padding: "8px 12px 12px",
+            background: "color-mix(in oklch, var(--panel), transparent 40%)",
+            borderTop: "1px solid var(--hair-2)",
+          }}
+        >
+          <div
+            className="row gap-2"
+            style={{ alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}
+          >
+            <div className="caps muted" style={{ fontSize: 10.5 }}>
+              Models at {endpoint.baseUrl}
+            </div>
+            <button
+              type="button"
+              className="btn ghost"
+              style={{ fontSize: 11 }}
+              onClick={() => refetch()}
+              disabled={isFetching}
+            >
+              {isFetching ? "…" : "↻"}
+            </button>
+          </div>
+          {errMsg && (
+            <div style={{ color: "var(--amber)", fontSize: 11 }}>
+              Couldn&rsquo;t reach endpoint: {errMsg}
+            </div>
+          )}
+          {!errMsg && isFetching && (
+            <div className="muted" style={{ fontSize: 11 }}>Loading…</div>
+          )}
+          {!errMsg && !isFetching && data && data.models.length === 0 && (
+            <div className="muted" style={{ fontSize: 11 }}>
+              No models loaded in LM Studio.
+            </div>
+          )}
+          {!errMsg && !isFetching && data && data.models.length > 0 && (
+            <div style={{ display: "grid", gap: 2 }}>
+              {data.models.map((m) => (
+                <div
+                  key={m.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: 8,
+                    padding: "4px 0",
+                    fontSize: 11.5,
+                  }}
+                >
+                  <div>
+                    <span className="mono">{m.id}</span>
+                    {m.label && m.label !== m.id && (
+                      <span className="muted" style={{ marginLeft: 8 }}>
+                        {m.label}
+                      </span>
+                    )}
+                  </div>
+                  {m.note && (
+                    <span className="muted mono" style={{ fontSize: 10.5 }}>
+                      {m.note}
+                    </span>
+                  )}
+                </div>
+              ))}
+              <div className="muted" style={{ fontSize: 10.5, marginTop: 4 }}>
+                Pick one in <span className="mono">Roles &amp; models</span> — paste the id or
+                pick it from the dropdown after hitting ↻.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Task } from "@/lib/api";
+import { api, type Alert, type Task } from "@/lib/api";
 import { Icon } from "./Icon";
 
 // Forces a decision on rows the gardener has flagged — captured-but-
@@ -17,6 +17,15 @@ export function TriageCard() {
     queryFn: () => api.tasks.list(),
     refetchInterval: 30_000,
   });
+  const { data: alerts = [] } = useQuery<Alert[]>({
+    queryKey: ["notifications"],
+    queryFn: () => api.notifications.list(),
+    refetchInterval: 30_000,
+  });
+  const dupAlerts = useMemo(
+    () => alerts.filter((a) => a.kind === "task.dup"),
+    [alerts],
+  );
 
   const captured = useMemo(
     () =>
@@ -51,8 +60,15 @@ export function TriageCard() {
     mutationFn: (id: string) => api.tasks.revive(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["tasks"] }),
   });
+  const actOnAlert = useMutation({
+    mutationFn: ({ id, op }: { id: string; op: string }) => api.notifications.act(id, op),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+    },
+  });
 
-  if (captured.length === 0 && stale.length === 0) {
+  if (captured.length === 0 && stale.length === 0 && dupAlerts.length === 0) {
     return null;
   }
 
@@ -64,8 +80,58 @@ export function TriageCard() {
         </span>
         <span className="mono muted" style={{ fontSize: 11 }}>
           {captured.length} captured · {stale.length} stale
+          {dupAlerts.length > 0 ? ` · ${dupAlerts.length} dupes` : ""}
         </span>
       </div>
+      {dupAlerts.length > 0 && (
+        <div style={{ borderBottom: "1px solid var(--hair)" }}>
+          <div
+            className="caps"
+            style={{ padding: "8px 14px 4px", fontSize: 10, color: "var(--muted)" }}
+          >
+            Possible duplicates ({dupAlerts.length})
+          </div>
+          {dupAlerts.map((a) => (
+            <div
+              key={a.id}
+              style={{
+                padding: "8px 14px",
+                borderBottom: "1px solid var(--hair)",
+                display: "grid",
+                gap: 6,
+              }}
+            >
+              <div style={{ fontSize: 12.5 }}>{a.title.replace(/^Possible duplicate: /, "")}</div>
+              <div className="muted" style={{ fontSize: 11 }}>
+                {a.body}
+              </div>
+              <div className="row gap-2">
+                <button
+                  className="btn primary"
+                  disabled={actOnAlert.isPending}
+                  onClick={() => actOnAlert.mutate({ id: a.id, op: "task.merge_into_canonical" })}
+                >
+                  Merge
+                </button>
+                <button
+                  className="btn"
+                  disabled={actOnAlert.isPending}
+                  onClick={() => actOnAlert.mutate({ id: a.id, op: "task.keep" })}
+                >
+                  Keep both
+                </button>
+                <button
+                  className="btn ghost"
+                  disabled={actOnAlert.isPending}
+                  onClick={() => actOnAlert.mutate({ id: a.id, op: "task.abandon_open" })}
+                >
+                  Abandon this one
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <div>
         {captured.map((t) => (
           <TriageRow

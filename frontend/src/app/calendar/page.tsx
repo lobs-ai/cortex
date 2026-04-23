@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Event, type JournalEntry } from "@/lib/api";
-import { fmtHM, fmtDateShort, fmtWeekday } from "@/lib/format";
+import { api, type Commitment, type Event, type JournalEntry, type Plan } from "@/lib/api";
+import { fmtHM, fmtDateShort, fmtWeekday, fmtRelative } from "@/lib/format";
 import { Icon } from "@/components/Icon";
 import { Markdown } from "@/components/Markdown";
 
@@ -67,6 +68,29 @@ export default function CalendarPage() {
   const { data: journal = [] } = useQuery({
     queryKey: ["journal", "reflection", rangeFrom.toISOString(), rangeTo.toISOString()],
     queryFn: () => api.journal.list({ kind: "reflection", from: rangeFrom, to: rangeTo, limit: 200 }),
+  });
+
+  // The dashboard's "proposed plan" shown as an overlay on the calendar.
+  // Only rendered on today's column (the plan is a daily plan) and only
+  // blocks that aren't echoes of real calendar events (kind === "block").
+  // Commitments render alongside as short markers so the user can see
+  // where Cortex wanted them to start something.
+  const { data: plan } = useQuery<Plan | null>({
+    queryKey: ["plan-today"],
+    queryFn: () => api.plans.today(),
+    refetchInterval: 60_000,
+  });
+  const { data: commitments = [] } = useQuery<Commitment[]>({
+    queryKey: ["commitments", "today"],
+    queryFn: async () => {
+      const now = new Date();
+      const from = new Date(now);
+      from.setHours(0, 0, 0, 0);
+      const to = new Date(from);
+      to.setDate(to.getDate() + 1);
+      return api.commitments.list(from, to);
+    },
+    refetchInterval: 30_000,
   });
 
   const reflectionsByEvent = useMemo(() => {
@@ -141,6 +165,27 @@ export default function CalendarPage() {
     return m;
   }, [events]);
 
+  // Convert planner's HH:MM blocks → Date ranges anchored to today. Only
+  // blocks whose kind === 'block' are overlays — the meeting/class/etc
+  // blocks are already echoes of real events.
+  const todayPlanOverlays = useMemo(() => {
+    if (!plan) return [] as Array<{ start: Date; end: Date; label: string; sub?: string; hero: boolean }>;
+    const out: Array<{ start: Date; end: Date; label: string; sub?: string; hero: boolean }> = [];
+    for (const b of plan.content.blocks ?? []) {
+      if (b.kind !== "block") continue;
+      const [sh, sm] = b.start.split(":").map((n) => parseInt(n, 10));
+      const [eh, em] = b.end.split(":").map((n) => parseInt(n, 10));
+      if (Number.isNaN(sh) || Number.isNaN(sm) || Number.isNaN(eh) || Number.isNaN(em)) continue;
+      const s = new Date(today);
+      s.setHours(sh, sm, 0, 0);
+      const e = new Date(today);
+      e.setHours(eh, em, 0, 0);
+      if (+e <= +s) continue;
+      out.push({ start: s, end: e, label: b.label, sub: b.sub, hero: !!b.hero });
+    }
+    return out;
+  }, [plan, today]);
+
   return (
     <div className="cal">
       <div className="cal-toolbar">
@@ -159,6 +204,23 @@ export default function CalendarPage() {
               ? fmtDateShort(new Date(+today + offset * 86400000))
               : `${fmtDateShort(new Date(+today + offset * 86400000))} — week`}
           </div>
+          {plan && view !== "month" && (todayPlanOverlays.length > 0 || commitments.length > 0) && (
+            <span
+              className="mono muted"
+              style={{
+                fontSize: 11,
+                marginLeft: 12,
+                padding: "2px 8px",
+                border: "1px dashed var(--hair-2)",
+                borderRadius: 4,
+              }}
+              title="Proposed by Cortex — shown as overlays on today's column"
+            >
+              <Icon name="sparkles" size={11} /> proposed plan · {fmtRelative(plan.createdAt)} · {todayPlanOverlays.length} block
+              {todayPlanOverlays.length === 1 ? "" : "s"} · {commitments.length} commitment
+              {commitments.length === 1 ? "" : "s"}
+            </span>
+          )}
         </div>
         <div className="grow" />
         <div className="seg">
@@ -182,10 +244,26 @@ export default function CalendarPage() {
       )}
 
       {view === "day" && (
-        <DayGrid today={today} eventsByDay={eventsByDay} offset={offset} onSelect={setSelected} reflections={reflectionsByEvent} />
+        <DayGrid
+          today={today}
+          eventsByDay={eventsByDay}
+          offset={offset}
+          onSelect={setSelected}
+          reflections={reflectionsByEvent}
+          planOverlays={todayPlanOverlays}
+          commitments={commitments}
+        />
       )}
       {view === "week" && (
-        <WeekGrid today={today} eventsByDay={eventsByDay} offset={offset} onSelect={setSelected} reflections={reflectionsByEvent} />
+        <WeekGrid
+          today={today}
+          eventsByDay={eventsByDay}
+          offset={offset}
+          onSelect={setSelected}
+          reflections={reflectionsByEvent}
+          planOverlays={todayPlanOverlays}
+          commitments={commitments}
+        />
       )}
       {view === "month" && (
         <MonthView today={today} eventsByDay={eventsByDay} offset={offset} onSelect={setSelected} reflections={reflectionsByEvent} />
@@ -288,6 +366,35 @@ function eventStyle(e: Event, base: Date) {
   return { top, height };
 }
 
+// Generic range→pixel helper, used by the planner overlay + commitment
+// marker so they share the same math as real events.
+function rangeStyle(start: Date, end: Date, base: Date) {
+  const startMin = Math.max(0, (+start - +base) / 60000);
+  const endMin = Math.min(24 * 60, (+end - +base) / 60000);
+  const top = (startMin / 60) * HOUR_PX;
+  const height = ((endMin - startMin) / 60) * HOUR_PX;
+  return { top, height };
+}
+
+function commitmentColor(state: Commitment["state"]): string {
+  switch (state) {
+    case "doing":
+      return "var(--green)";
+    case "prompted":
+      return "var(--amber)";
+    case "waiting":
+      return "var(--amber)";
+    case "done":
+      return "var(--green)";
+    case "skipped":
+    case "missed":
+    case "rescheduled":
+      return "var(--muted)";
+    default:
+      return "var(--muted)";
+  }
+}
+
 // Pick the local-midnight day key for an all-day boundary timestamp. When the
 // server and client share a timezone the event is stored at local midnight. When
 // the server is UTC the event arrives as UTC-midnight and we should key by the
@@ -331,45 +438,47 @@ function isAllDay(ev: Event): boolean {
   return wholeDays && (atLocalMidnight || atUtcMidnight);
 }
 
-type Positioned = { ev: Event; col: number; cols: number };
+type PlanBlock = { start: Date; end: Date; label: string; sub?: string; hero: boolean };
+type LaneItem =
+  | { kind: "event"; ev: Event; start: number; end: number }
+  | { kind: "plan"; block: PlanBlock; start: number; end: number };
+type Positioned<T> = { item: T; col: number; cols: number };
 
-// Greedy column packing for overlapping events. Groups transitively-overlapping
-// events, assigns each to the lowest-index column whose last event has ended,
-// and gives every event in the group the same total column count so widths align.
-function layoutColumns(events: Event[]): Positioned[] {
-  if (events.length === 0) return [];
-  const sorted = [...events].sort((a, b) => {
-    const as = +new Date(a.start);
-    const bs = +new Date(b.start);
-    if (as !== bs) return as - bs;
-    return +new Date(a.end) - +new Date(b.end);
+// Greedy column packing for overlapping items. Groups transitively-overlapping
+// items, assigns each to the lowest-index column whose last item has ended,
+// and gives every item in the group the same total column count so widths align.
+// Events and plan overlays share the same lane so they stack side-by-side like
+// Google Calendar instead of overlapping visually.
+function layoutColumns(items: LaneItem[]): Positioned<LaneItem>[] {
+  if (items.length === 0) return [];
+  const sorted = [...items].sort((a, b) => {
+    if (a.start !== b.start) return a.start - b.start;
+    return a.end - b.end;
   });
 
-  type Item = { ev: Event; col: number; end: number };
-  const groups: Item[][] = [];
-  let cur: Item[] = [];
+  type Entry = { item: LaneItem; col: number; end: number };
+  const groups: Entry[][] = [];
+  let cur: Entry[] = [];
   let curMaxEnd = 0;
 
-  for (const ev of sorted) {
-    const s = +new Date(ev.start);
-    const e = +new Date(ev.end);
-    if (cur.length > 0 && s < curMaxEnd) {
+  for (const it of sorted) {
+    if (cur.length > 0 && it.start < curMaxEnd) {
       let col = 0;
-      while (cur.some((x) => x.col === col && x.end > s)) col++;
-      cur.push({ ev, col, end: e });
-      if (e > curMaxEnd) curMaxEnd = e;
+      while (cur.some((x) => x.col === col && x.end > it.start)) col++;
+      cur.push({ item: it, col, end: it.end });
+      if (it.end > curMaxEnd) curMaxEnd = it.end;
     } else {
       if (cur.length) groups.push(cur);
-      cur = [{ ev, col: 0, end: e }];
-      curMaxEnd = e;
+      cur = [{ item: it, col: 0, end: it.end }];
+      curMaxEnd = it.end;
     }
   }
   if (cur.length) groups.push(cur);
 
-  const out: Positioned[] = [];
+  const out: Positioned<LaneItem>[] = [];
   for (const g of groups) {
     const cols = Math.max(...g.map((x) => x.col)) + 1;
-    for (const item of g) out.push({ ev: item.ev, col: item.col, cols });
+    for (const entry of g) out.push({ item: entry.item, col: entry.col, cols });
   }
   return out;
 }
@@ -380,29 +489,67 @@ function DayColumn({
   isToday,
   onSelect,
   reflections,
+  planOverlays,
+  commitments,
 }: {
   date: Date;
   events: Event[];
   isToday: boolean;
   onSelect?: (ev: Event) => void;
   reflections?: Map<string, JournalEntry>;
+  planOverlays?: PlanBlock[];
+  commitments?: Commitment[];
 }) {
   const now = useNow();
   const nowMin = now.getHours() * 60 + now.getMinutes();
   const nowTop = (nowMin / 60) * HOUR_PX;
 
-  const positioned = useMemo(
-    () => layoutColumns(events.filter((e) => !isAllDay(e))),
-    [events],
-  );
+  const positioned = useMemo(() => {
+    const items: LaneItem[] = [];
+    for (const ev of events) {
+      if (isAllDay(ev)) continue;
+      items.push({
+        kind: "event",
+        ev,
+        start: +new Date(ev.start),
+        end: +new Date(ev.end),
+      });
+    }
+    for (const b of planOverlays ?? []) {
+      items.push({ kind: "plan", block: b, start: +b.start, end: +b.end });
+    }
+    return layoutColumns(items);
+  }, [events, planOverlays]);
 
   return (
     <div className="day-col" style={{ position: "relative", height: GRID_HEIGHT }}>
-      {positioned.map(({ ev, col, cols }) => {
-        const { top, height } = eventStyle(ev, date);
-        const pending = ev.rsvpStatus === "needsAction";
-        const ended = new Date(ev.end) < now;
-        const reflection = reflections?.get(ev.id);
+      {/* Commitments are short — render as a thin colored marker at the
+          start line instead of a full box, so they don't visually compete
+          with events. Each shows its title + duration on hover. */}
+      {(commitments ?? []).map((c) => {
+        const start = new Date(c.startTime);
+        const end = new Date(+start + c.durationMin * 60_000);
+        const { top, height } = rangeStyle(start, end, date);
+        if (height <= 0) return null;
+        const color = commitmentColor(c.state);
+        return (
+          <div
+            key={`cm-${c.id}`}
+            className="commitment-overlay"
+            style={{
+              position: "absolute",
+              top,
+              height: Math.max(height, 14),
+              left: 0,
+              width: 3,
+              background: color,
+              zIndex: 1,
+            }}
+            title={`${c.title} · ${c.durationMin}m · ${c.state}${c.verifyCriterion ? `\nDone: ${c.verifyCriterion}` : ""}`}
+          />
+        );
+      })}
+      {positioned.map(({ item, col, cols }, i) => {
         const widthPct = 100 / cols;
         const positionStyle: React.CSSProperties =
           cols === 1
@@ -412,6 +559,57 @@ function DayColumn({
                 right: "auto",
                 width: `calc(${widthPct}% - 4px)`,
               };
+
+        if (item.kind === "plan") {
+          const b = item.block;
+          const { top, height } = rangeStyle(b.start, b.end, date);
+          if (height <= 0) return null;
+          return (
+            <Link
+              key={`po-${i}`}
+              href="/"
+              className="plan-overlay"
+              style={{
+                position: "absolute",
+                top,
+                height,
+                left: 2,
+                right: 2,
+                border: `1px dashed ${b.hero ? "var(--green)" : "var(--muted)"}`,
+                background: b.hero
+                  ? "color-mix(in oklch, var(--green), transparent 92%)"
+                  : "color-mix(in oklch, var(--muted), transparent 94%)",
+                padding: "3px 6px",
+                fontSize: 11,
+                zIndex: 2,
+                color: "var(--muted)",
+                overflow: "hidden",
+                borderRadius: 2,
+                cursor: "pointer",
+                textDecoration: "none",
+                display: "block",
+                ...positionStyle,
+              }}
+              title={`Proposed by Cortex${b.sub ? ` — ${b.sub}` : ""} — click to view plan`}
+            >
+              <div style={{ fontWeight: b.hero ? 600 : 500 }} className="truncate">
+                {b.hero ? "★ " : ""}
+                {b.label}
+              </div>
+              {b.sub && (
+                <div className="muted-2 truncate" style={{ fontSize: 10 }}>
+                  {b.sub}
+                </div>
+              )}
+            </Link>
+          );
+        }
+
+        const ev = item.ev;
+        const { top, height } = eventStyle(ev, date);
+        const pending = ev.rsvpStatus === "needsAction";
+        const ended = new Date(ev.end) < now;
+        const reflection = reflections?.get(ev.id);
         return (
           <button
             key={ev.id}
@@ -421,6 +619,7 @@ function DayColumn({
             style={{
               top,
               height,
+              zIndex: 2,
               ...positionStyle,
               ...(pending ? { borderStyle: "dashed", opacity: 0.8 } : {}),
               ...(ev.subscribed ? { opacity: 0.55, borderStyle: "dotted" } : {}),
@@ -535,12 +734,16 @@ function DayGrid({
   offset,
   onSelect,
   reflections,
+  planOverlays,
+  commitments,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
   offset: number;
   onSelect?: (ev: Event) => void;
   reflections?: Map<string, JournalEntry>;
+  planOverlays?: Array<{ start: Date; end: Date; label: string; sub?: string; hero: boolean }>;
+  commitments?: Commitment[];
 }) {
   const date = useMemo(() => {
     const d = new Date(today);
@@ -567,7 +770,15 @@ function DayGrid({
       <AllDayStrip days={[date]} eventsByDay={eventsByDay} onSelect={onSelect} />
       <div className="day-grid" ref={scrollRef}>
         <HourColumn />
-        <DayColumn date={date} events={events} isToday={isToday} onSelect={onSelect} reflections={reflections} />
+        <DayColumn
+          date={date}
+          events={events}
+          isToday={isToday}
+          onSelect={onSelect}
+          reflections={reflections}
+          planOverlays={isToday ? planOverlays : undefined}
+          commitments={isToday ? commitments : undefined}
+        />
       </div>
     </div>
   );
@@ -579,12 +790,16 @@ function WeekGrid({
   offset,
   onSelect,
   reflections,
+  planOverlays,
+  commitments,
 }: {
   today: Date;
   eventsByDay: Map<number, Event[]>;
   offset: number;
   onSelect?: (ev: Event) => void;
   reflections?: Map<string, JournalEntry>;
+  planOverlays?: Array<{ start: Date; end: Date; label: string; sub?: string; hero: boolean }>;
+  commitments?: Commitment[];
 }) {
   const days = useMemo(() => {
     const ref = new Date(today);
@@ -618,16 +833,21 @@ function WeekGrid({
       <AllDayStrip days={days} eventsByDay={eventsByDay} onSelect={onSelect} />
       <div className="week-grid" ref={scrollRef}>
         <HourColumn />
-        {days.map((d, i) => (
-          <DayColumn
-            key={i}
-            date={d}
-            events={eventsByDay.get(+d) ?? []}
-            isToday={+d === +today}
-            onSelect={onSelect}
-            reflections={reflections}
-          />
-        ))}
+        {days.map((d, i) => {
+          const isToday = +d === +today;
+          return (
+            <DayColumn
+              key={i}
+              date={d}
+              events={eventsByDay.get(+d) ?? []}
+              isToday={isToday}
+              onSelect={onSelect}
+              reflections={reflections}
+              planOverlays={isToday ? planOverlays : undefined}
+              commitments={isToday ? commitments : undefined}
+            />
+          );
+        })}
       </div>
     </div>
   );
